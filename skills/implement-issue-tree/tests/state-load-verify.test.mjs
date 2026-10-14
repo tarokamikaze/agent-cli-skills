@@ -324,8 +324,8 @@ test('loadState: 新規作成（items: {}）は検証成立で verified: true', 
 const makeItems = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [String(100 + i), { status: 'monitoring', pr: 1000 + i, branch: `fix/${100 + i}-x` }]))
 const hashesOf = (items) => Object.fromEntries(Object.entries(items).map(([k, v]) => [k, sha256Hex(canonicalJson(v))]))
 const verifyResult = (hashes) => ({ fileExists: true, hashes, keysSha256: keysOf(hashes), keysCount: Object.keys(hashes).length, highWaterBytes: 0, highWaterVersion: 0 })
-// fill プロンプトの state-read.sh keys <状態ファイル> <キー>... から要求キーを取り出し、実ファイル相当の items から返す。
-const requestedKeys = (prompt) => /state-read\.sh keys \S+((?: [0-9]+)+)$/m.exec(prompt)[1].trim().split(' ')
+// fill プロンプトの --argjson k '[...]' から要求キーを取り出し、実ファイル相当の items から返す。
+const requestedKeys = (prompt) => JSON.parse(/--argjson k '(\[[^']*\])'/.exec(prompt)[1])
 
 test('loadState: 30 件の状態ファイルで state:load が先頭 5 件しか返しても、ホストが 5 件ずつ再取得して全件採用する', async () => {
   const all = makeItems(30)
@@ -348,9 +348,7 @@ test('loadState: 30 件の状態ファイルで state:load が先頭 5 件しか
   const seen = fillCalls.flatMap(requestedKeys)
   assert.equal(new Set(seen).size, 25)
   assert.ok(seen.every((k) => !(k in first5)))
-  assert.ok(fillCalls.every((p) => requestedKeys(p).length <= 5 && /^bash '[^']*\/scripts\/run-verified\.sh' \S+ state-read\.sh keys _\/issue-trees\/1\.json( [0-9]+)+$/m.test(p)))
-  // jq の式はコマンド行に載せない（同梱スクリプトが持つ）
-  assert.ok(fillCalls.every((p) => !p.includes('with_entries') && !p.includes('--argjson')))
+  assert.ok(fillCalls.every((p) => requestedKeys(p).length <= 5 && /jq -c --argjson k /.test(p) && p.includes('.items | with_entries')))
 })
 
 test('loadState: 再取得が値を返さない場合は 2 巡で打ち切り、欠落キーを state-unverified として明示する（throw しない）', async () => {
@@ -429,17 +427,11 @@ test('検証プロンプトは項目ごとの jq -jcS ハッシュを要求し�
   const { calls } = installAgentStub((opts) =>
     opts.label === 'state:load' ? loadResult({}) : { fileExists: true, hashes: {}, keysSha256: keysOf({}), keysCount: Object.keys({}).length, highWaterBytes: 0, highWaterVersion: 0 })
   await loadState()
-  // 検証は同梱の state-verify.sh を 1 コマンドで呼ぶ（項目ごとの jq -jcS のハッシュ・キーの絞り込みはスクリプトが行う。
-  // 旧コマンドと同じ出力になることは state-scripts.test.mjs が実ファイルで検証する）
-  assert.match(calls[1].prompt, /^bash '[^']*\/scripts\/run-verified\.sh' \S+ state-verify\.sh _\/issue-trees\/1\.json$/m)
-  assert.doesNotMatch(calls[1].prompt, /jq -jcS|h\(\) \{|\$\(jq/)
-  const sh = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'state-verify.sh'), 'utf8')
-  assert.ok(sh.includes(`jq -jcS --arg k "\${k}" '.items[$k]'`))
+  assert.match(calls[1].prompt, /jq -jcS --arg k "\$k" '\.items\[\$k\]'/)
   // キーは issue 番号（正の整数の 10 進表記）だけに絞り、「キー ハッシュ」行の解釈を一意にする。
-  assert.ok(sh.includes(`keys[] | select(test("^[1-9][0-9]*$"))`))
-  // 読込は state-read.sh（summary・range）で行い、jq の式をエージェントに組み立てさせない
-  assert.match(calls[0].prompt, /state-read\.sh summary _\/issue-trees\/1\.json/)
-  assert.match(calls[0].prompt, /state-read\.sh range _\/issue-trees\/1\.json <開始> <終了>/)
+  assert.ok(calls[1].prompt.includes(`keys[] | select(test("^[1-9][0-9]*$"))`))
+  assert.match(calls[1].prompt, /sha256sum/)
+  assert.match(calls[1].prompt, /shasum -a 256/)
   assert.match(calls[0].prompt, /5 件ずつ/)
   assert.match(calls[0].prompt, /推測で埋めない/)
   assert.match(calls[0].prompt, /ホストが再取得/)
@@ -888,21 +880,18 @@ test('検証プロンプトは KEYS 行（数値キー一覧の jq -jc ダイジ
     opts.label === 'state:load' ? loadResult({}) : { fileExists: true, hashes: {}, keysSha256: JQ_KEYS_SHA_EMPTY, keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 })
   await loadState()
   const p = calls[1].prompt
-  // KEYS 行の計算は state-verify.sh が行う（出力が旧コマンドとバイト単位で同じことは state-scripts.test.mjs が検証する）
-  const sh = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'state-verify.sh'), 'utf8')
-  assert.ok(sh.includes(`K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'`))
-  assert.ok(sh.includes('echo "KEYS $(jq -jc "${K}" "${f}" | h | cut -c1-64) $(jq "${K} | length" "${f}")"'))
+  assert.ok(p.includes(`K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"`))
   // KEYS 行（ダイジェストと件数）はコマンド出力の先頭: ファイルあり分岐で最初の出力コマンドであり、
   // 高水位の行・項目ごとのハッシュ行（while ループ）より前に出す（Bugbot 指摘）。
-  const branchStart = sh.indexOf('if [ -f "${f}" ]; then')
-  const keysIdx = sh.indexOf('echo "KEYS ')
-  const hwIdx = sh.indexOf("jq -c '[.perWorktreeByteReserveHighWater")
-  const loopIdx = sh.indexOf('while IFS= read -r k')
+  const branchStart = p.indexOf('if [ -f "$f" ]; then ')
+  const keysIdx = p.indexOf('echo "KEYS ')
+  const hwIdx = p.indexOf("jq -c '[.perWorktreeByteReserveHighWater")
+  const loopIdx = p.indexOf('while IFS= read -r k')
   assert.ok(branchStart > 0 && keysIdx > branchStart && keysIdx < hwIdx && hwIdx < loopIdx, 'KEYS 行が出力の先頭にない')
-  assert.doesNotMatch(sh.slice(branchStart, keysIdx), /echo |printf |jq -c|jq -r/, 'KEYS 行より前に別の出力がある')
+  assert.doesNotMatch(p.slice(branchStart, keysIdx), /echo |printf |jq -c|jq -r/, 'KEYS 行より前に別の出力がある')
   // 範囲指定での分割実行（キー行のみ）
-  assert.ok(sh.includes('sed -n "${range}p"'))
-  assert.match(p, /同じコマンドの末尾に行範囲を足して〔例: 1 20〕分割実行し全件を取得する/)
+  assert.ok(p.includes('sed -n "${R:-1,\\$}p"'))
+  assert.match(p, /R=1,20 のように行範囲を指定して同じコマンドを分割実行し全件を取得する/)
 })
 
 test('検証プロンプトは keysSha256 / keysCount を KEYS 行からそのまま転記させ、再計算・自前のキー一覧からの作成を禁じる', async () => {
