@@ -97,21 +97,14 @@ function treePrompt() {
   return driverPart.slice(start, end)
 }
 
-// ツリーの取得は同梱の fetch-tree.sh が行い（Issue #300 の追跡）、プロンプトはその 1 コマンドと出力の転記だけを指示する。
-// 取得の手順（closed も辿る・total 0 のみ leaf・全ページ取得・件数の自己点検）はスクリプト側で固定する
-// （偽の gh での実行は issue-scripts.test.mjs）。
-test('(f) Tree 取得プロンプトは fetch-tree.sh の 1 コマンドを指示し、スクリプトは closed も辿る・total 0 のみ leaf・全ページ取得する', () => {
+test('(f) Tree 取得プロンプトは closed も辿る・total 0 のみ leaf・全ノードで sub_issues を呼ぶ', () => {
   const p = treePrompt()
-  assert.match(p, /scriptCommand\('fetch-tree\.sh', ` \$\{parent\}`\)/)
-  assert.match(p, /closed のノードも辿る/)
+  assert.match(p, /closed のノードも必ず辿る/)
+  assert.match(p, /`sub_issues_summary\.total` が 0 のノードだけ/)
+  assert.match(p, /それ以外の全ノードで `sub_issues` を呼ぶ/)
   assert.match(p, /subIssuesTotal/)
-  assert.match(p, /ホストも同じ照合をし、不一致なら停止する/)
-  assert.doesNotMatch(p, /gh api/, 'エージェントに gh api の式を組み立てさせない')
-  const sh = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'fetch-tree.sh'), 'utf8')
-  assert.match(sh, /gh api --paginate "repos\/\{owner\}\/\{repo\}\/issues\/\$\{parent\}\/sub_issues\?per_page=100"/)
-  // total が 0 でないノードだけをキューへ積む（closed かどうかでは絞らない）
-  assert.match(sh, /if \[ "\$5" != 0 \]; then\n\s+printf '%s\\t%s\\n' "\$1" "\$5" >>"\$\{queue\}"/)
-  assert.match(sh, /MISMATCH/)
+  assert.match(p, /--paginate/)
+  assert.match(p, /ホストも同照合し/)
 })
 
 test('(g) クローズ検証プロンプトは直下だけでなく子孫を再帰確認する', () => {

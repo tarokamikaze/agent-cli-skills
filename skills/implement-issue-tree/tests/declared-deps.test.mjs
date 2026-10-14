@@ -8,7 +8,6 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { requestedNumbers } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -26,7 +25,9 @@ const driverPart = source.slice(markerIndex)
 const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-declared-deps-'))
 const slicePath = join(sliceDir, 'implement-issue-tree-declared-deps-defs.mjs')
 const SLICE_EXPORTS = [
+  'DECLARED_DEPS_JQ',
   'DECLARED_DEPS_MAX_PER_NODE',
+  'DECLARED_DEPS_SIG_JQ',
   'declaredDepsChecksum',
   'declaredDepsPrompt',
   'collectDeclaredDeps',
@@ -44,16 +45,10 @@ const optionalExports = SLICE_EXPORTS.map((n) => `const __opt_${n} = typeof ${n}
 const exportList = SLICE_EXPORTS.map((n) => `__opt_${n} as ${n}`).join(', ')
 writeFileSync(slicePath, `${definitionPart}\n${optionalExports}\nexport { ${exportList} }\n`)
 
-// jq のフィルタは scripts/lib/issue-jq.sh にある（probe-declared-deps.sh が source する）。テストも同じファイルを
-// bash で source して値を取り出し、スクリプトが実行するのと同じ文字列を検証する。
-const ISSUE_JQ_LIB = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lib', 'issue-jq.sh')
-const libVar = (name) => execFileSync('bash', ['-c', `. "$1" && printf '%s' "$${name}"`, '_', ISSUE_JQ_LIB]).toString()
-const DECLARED_DEPS_JQ = libVar('DECLARED_DEPS_JQ')
-const DECLARED_DEPS_SIG_JQ = libVar('DECLARED_DEPS_SIG_JQ')
-const PROBE_SCRIPT = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'probe-declared-deps.sh'), 'utf8')
-
 const {
+  DECLARED_DEPS_JQ,
   DECLARED_DEPS_MAX_PER_NODE,
+  DECLARED_DEPS_SIG_JQ,
   declaredDepsChecksum,
   declaredDepsPrompt,
   collectDeclaredDeps,
@@ -195,23 +190,20 @@ test('依存宣言がなければ空配列・body が null でも失敗しない
   assert.deepEqual(runFilter(null), [])
 })
 
-test('declaredDepsPrompt は整数の対象番号を同梱スクリプトの引数に並べた 1 コマンドを渡し、jq の式をコマンド行に載せない', () => {
+test('declaredDepsPrompt は整数の対象番号と jq フィルタを単一引用符で埋め込む', () => {
   const p = declaredDepsPrompt([34, 45])
-  const cmd = p.split('\n').find((l) => l.includes('probe-declared-deps.sh'))
-  assert.match(cmd, /^bash '[^']*\/scripts\/run-verified\.sh' \S+ probe-declared-deps\.sh 34 45$/)
-  assert.ok(!p.includes(DECLARED_DEPS_JQ))
-  assert.doesNotMatch(cmd, /[{}"]|\$\(|;|&&|\|/, '{}・引用符・$(...)・連結をコマンド行に含めない')
-  assert.ok(!DECLARED_DEPS_JQ.includes("'"), 'jq フィルタに単一引用符を含めない（lib の単一引用符の代入が壊れる）')
-  assert.throws(() => declaredDepsPrompt([1, '2; rm -rf /']), /正の整数/)
+  assert.match(p, /for n in 34 45; do out=\$\(gh api "repos\/\{owner\}\/\{repo\}\/issues\/\$n" --jq '/)
+  assert.match(p, /\) && printf '%s\\n' "\$out" \|\| echo "FAILED #\$n" >&2; done/)
+  assert.ok(p.includes(DECLARED_DEPS_JQ))
+  assert.ok(!DECLARED_DEPS_JQ.includes("'"), 'jq フィルタに単一引用符を含めない（シェル埋め込みが壊れる）')
 })
 
 // Issue #589: 本文の取得は REST（core 枠）で行い、GraphQL 枠をイシュー 1 件ごとに消費しない。
-test('probe-declared-deps.sh は gh issue view（GraphQL）を使わず gh api（REST）で取得する (#589)', () => {
-  const code = PROBE_SCRIPT.split('\n').filter((l) => !l.trimStart().startsWith('#')).join('\n')
-  assert.ok(!code.includes('gh issue view'), 'GraphQL を使う gh issue view を使わない')
-  assert.ok(!code.includes('gh repo view'), 'リポジトリ解決で GraphQL を使わない（{owner}/{repo} は gh がローカルで展開する）')
-  assert.ok(code.includes('gh api "repos/{owner}/{repo}/issues/${n}" --jq "${filter}"'))
-  assert.ok(!declaredDepsPrompt([1]).includes('gh issue view'))
+test('declaredDepsPrompt は gh issue view（GraphQL）を使わず gh api（REST）を指示する (#589)', () => {
+  const p = declaredDepsPrompt([1])
+  assert.ok(!p.includes('gh issue view'), 'GraphQL を使う gh issue view を指示しない')
+  assert.ok(!p.includes('gh repo view'), 'リポジトリ解決で GraphQL を使わない（{owner}/{repo} は gh がローカルで展開する）')
+  assert.match(p, /gh api "repos\/\{owner\}\/\{repo\}\/issues\/\$n"/)
 })
 
 test('declaredDepsPrompt は gh を sandbox 無効で実行する指示を含む', () => {
@@ -313,7 +305,7 @@ test('collectDeclaredDeps: 依頼外エントリの number を依頼番号へ書
   assert.throws(() => collectDeclaredDeps([545], { entries: [{ number: 545, deps: [], sig: declaredDepsChecksum(546, []) }] }), /sig/)
 })
 
-test('declaredDepsPrompt: 担当範囲（コマンドの末尾の番号のみ）を明記する (#558)', () => {
+test('declaredDepsPrompt: 担当範囲（for n in の番号のみ）を明記する (#558)', () => {
   assert.match(declaredDepsPrompt([1]), /担当は.*番号だけ/)
 })
 
@@ -328,7 +320,7 @@ test('抽出関数は ignored を警告ログに出す (#558)', () => {
 
 const logs = []
 globalThis.log = (m) => { logs.push(m) }
-const requestedOf = (prompt) => requestedNumbers(prompt)
+const requestedOf = (prompt) => /for n in ([0-9 ]+); do/.exec(prompt)[1].trim().split(' ').map(Number)
 const okEntries = (prompt) => ({ entries: requestedOf(prompt).map((n) => e(n, [])) })
 const chunksOf = (total, size = 3) => Array.from({ length: Math.ceil(total / size) }, (_, i) =>
   Array.from({ length: Math.min(size, total - i * size) }, (_, j) => i * size + j + 1))
@@ -485,22 +477,23 @@ test('extractDeclaredDeps: レート制限の申告があっても全件返却�
 })
 
 // Bugbot B（fandhe-edge-model#537・ideas#447）: HTTP 403 を無条件にレート制限とみなさない。
-// レート制限の判定（メッセージの語・HTTP 403 / 429 と core の remaining）は probe-declared-deps.sh が行い、確認できた
-// ときだけ RATE_LIMIT 行を出す（スクリプトの振る舞いは issue-scripts.test.mjs が偽の gh で検証する）。プロンプトは
-// RATE_LIMIT 行の転記だけを指示する。
-test('declaredDepsPrompt: rateLimited を立てるのは RATE_LIMIT 行が出たときだけで、権限系の 403 は通常の失敗にする (Bugbot B)', () => {
+test('declaredDepsPrompt: レート制限と判定するのはメッセージに rate limit 系の語がある、または core の remaining が 0 のときに限る (Bugbot B)', () => {
   const p = declaredDepsPrompt([1])
-  assert.match(p, /RATE_LIMIT core <remaining> <resetAt> <waitSeconds>/)
-  assert.match(p, /RATE_LIMIT 行が無ければ rateLimited は false（権限・SSO など他の 403 は通常の失敗として扱う）/)
+  assert.match(p, /rate limit・secondary rate limit・RATE_LIMITED/, 'メッセージ側の判定語')
+  assert.match(p, /remaining/, 'core の残量（remaining）で判定する')
+  assert.match(p, /gh api rate_limit --jq '\.resources\.core \| \{remaining,/, 'remaining を取得するコマンド')
+  assert.match(p, /remaining が 0 のときだけ rateLimited を true/, '条件を限定する')
+  assert.match(p, /権限・SSO など他の 403 は rateLimited にしない/, '権限系の 403 は対象外と明記')
+  assert.match(p, /通常の失敗として扱う/)
+  // 旧文言（403 があれば無条件に rateLimited）が残っていない
   assert.doesNotMatch(p, /HTTP 403・429・rate limit が出たら/)
   assert.doesNotMatch(DECLARED_DEPS_SCHEMA.properties.rateLimited.description, /HTTP 403・429・rate limit）が出たら true/)
-  assert.match(DECLARED_DEPS_SCHEMA.properties.rateLimited.description, /権限・SSO などの 403 は false/)
 })
 
-test('declaredDepsPrompt: secondary rate limit は core の reset と無関係なので resetAt・waitSeconds を省略させる（ホストが固定の短い待機） (Bugbot B)', () => {
+test('declaredDepsPrompt: secondary rate limit は core の reset と無関係なので retry-after を待ち時間にし、無ければ省略させる (Bugbot B)', () => {
   const p = declaredDepsPrompt([1])
-  assert.match(p, /「RATE_LIMIT secondary」が出たら rateLimited: true とし、resetAt と waitSeconds は省略する/)
-  assert.match(DECLARED_DEPS_SCHEMA.properties.waitSeconds.description, /secondary rate limit・値が - なら省略/)
+  assert.match(p, /secondary rate limit なら resetAt は省略して waitSeconds に retry-after の秒数を入れる（無ければ省略）/)
+  assert.match(DECLARED_DEPS_SCHEMA.properties.waitSeconds.description, /secondary rate limit なら retry-after/)
 })
 
 test('extractDeclaredDeps: 権限系の 403（rateLimited を立てない返却）は待たず通常の失敗として再試行し、一過性と案内せず停止する (Bugbot B)', async () => {

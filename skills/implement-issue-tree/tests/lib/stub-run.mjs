@@ -47,20 +47,8 @@ function buildTree(leaves) {
   return nodes
 }
 
-/** テストが渡すスキルディレクトリ（全ランの必須引数。stub agent はスクリプトを実行しないので実在しなくてよい）。 */
-export const STUB_SKILL_DIR = '/opt/skills/implement-issue-tree'
-
-/** 測定スクリプトを使わない最小の引数（残置上限の両軸を無効化する）。 */
-export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
-
-/**
- * 依存宣言・ツリー外前提の取得プロンプト（probe-declared-deps.sh / probe-prereqs.sh を起動する 1 コマンド）から、
- * ホストが依頼した番号の並びを取り出す。コマンドが無ければ null。
- */
-export function requestedNumbers(prompt) {
-  const m = /(?:probe-declared-deps|probe-prereqs)\.sh((?: [0-9]+)+)$/m.exec(prompt)
-  return m ? m[1].trim().split(' ').map(Number) : null
-}
+/** 測定スクリプトを使わない最小の引数（残置上限の両軸を無効化し skillDir を不要にする）。 */
+export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0 }
 
 /**
  * @param {{ args: object, leaves?: number[], override?: (label: string, opts: object, prompt: string) => any }} params
@@ -83,11 +71,13 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
-      return { entries: requestedNumbers(prompt).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
+      const m = /for n in ([0-9 ]+); do/.exec(prompt)
+      return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
     }
     if (label.startsWith('plan:root-ancestors')) return { fetched: true, chain: [{ number: args.parent, parent: 0 }] }
     if (label.startsWith('plan:out-of-tree-deps')) {
-      return { entries: requestedNumbers(prompt).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
+      const m = /for n in ([0-9 ]+); do/.exec(prompt)
+      return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
     }
     if (label === 'worktree:orphan-scan') return { entries: [{ path: '/repo', branch: 'main', isMain: true }] }
     if (label === 'worktree:record-count') return { count: 1 }

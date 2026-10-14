@@ -18,7 +18,6 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { signedReply } from './lib/signed-output.mjs'
-import { requestedNumbers, STUB_SKILL_DIR } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
@@ -181,11 +180,13 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
-      return { entries: requestedNumbers(prompt).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
+      const m = /for n in ([0-9 ]+); do/.exec(prompt)
+      return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
     }
     if (label.startsWith('plan:root-ancestors')) return { fetched: true, chain: [{ number: args.parent, parent: 0 }] }
     if (label.startsWith('plan:out-of-tree-deps')) {
-      return { entries: requestedNumbers(prompt).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
+      const m = /for n in ([0-9 ]+); do/.exec(prompt)
+      return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
     }
     if (label === 'worktree:orphan-scan') return { entries: [{ path: '/repo', branch: 'main', isMain: true }] }
     if (label === 'worktree:record-count') return { count: 1 }
@@ -212,7 +213,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
   return { result, calls, logs, peak }
 }
 
-const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
+const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0 }
 const LEAVES = [2, 3, 4, 5, 6, 7, 8, 9]
 
 test('結合: 上限が十分大きければ従来どおり全件に着手し、予算による停止は起きない', async () => {
