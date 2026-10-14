@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # issue-jq.sh — イシューの機械取得に使う jq フィルタの定義（source 専用）
 #
-# 呼び出し元: probe-declared-deps.sh / probe-prereqs.sh（Issue #300 の追跡）。旧版は同じフィルタを
+# 呼び出し元: probe-declared-deps.sh / probe-prereqs.sh（利用側のリポジトリで観測した権限確認によるランの停止への対応）。旧版は同じフィルタを
 #             implement-issue-tree.src.js の定数（DECLARED_DEPS_JQ・DECLARED_DEPS_SIG_JQ・OUT_OF_TREE_STATE_SIG_JQ）に持ち、
 #             エージェントへ渡すコマンド行に埋め込んでいた。{} と引用符がコマンド行に同居して Claude Code の権限確認が
 #             出るため、フィルタをこのファイルへ移した。値は旧定数と同じ文字列（tests/ が抽出結果と sig の一致を検証する）。

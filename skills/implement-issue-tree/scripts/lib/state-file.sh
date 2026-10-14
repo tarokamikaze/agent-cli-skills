@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # state-file.sh — 状態ファイル（_/issue-trees/<parent>.json）を扱うスクリプトの共通ヘルパー（source 専用）
 #
-# 呼び出し元: state-verify.sh / state-read.sh / state-write.sh（Issue #300 の追跡: agent にシェルを組み立てさせず、
+# 呼び出し元: state-verify.sh / state-read.sh / state-write.sh（利用側のリポジトリで観測した権限確認によるランの停止への対応: agent にシェルを組み立てさせず、
 #             同梱スクリプトを 1 コマンドで呼ばせる）。
 # 役割: 入力（状態ファイルのパス・整数・nonce）の形式検証と、jq の出力で状態ファイルを原子的に置き換える書き込み。
 #       書き込みは「同じディレクトリに mktemp で一時ファイルを作り、jq の出力を書いて mv で置き換える」形で、

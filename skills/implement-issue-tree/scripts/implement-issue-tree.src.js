@@ -1272,7 +1272,7 @@ const TEMP_FILE_POLICY =
   + '他ブランチ・origin の内容は HEAD を動かさず git show <ref>:<path>・git diff・git ls-tree・git log で読む（git fetch は可）。'
   + '隔離 worktree 内の操作、手順が明示する git -C <別 worktree> の操作、git worktree remove / prune、ブランチ削除は対象外。'
 
-// 状態ファイル・GitHub の読み書きを同梱スクリプトに限る規則（Issue #300 の追跡）。エージェントがその場で組み立てる
+// 状態ファイル・GitHub の読み書きを同梱スクリプトに限る規則（利用側のリポジトリで観測した権限確認によるランの停止への対応）。エージェントがその場で組み立てる
 // シェル（関数定義・$(...) の入れ子・{} と引用符を含む jq の式・; / && / | の連結）は書き方が毎回変わり、Claude Code の
 // 権限確認（auto mode の分類器・展開による難読化の検査）がランのたびに出てランが止まる。ホストが組み立てた 1 コマンドを
 // そのまま実行させる。
@@ -1484,7 +1484,7 @@ const TREE_SCHEMA = {
 // 行単位の否定判定を誤らせないようにする）。インデントされた行はコードブロックとみなさず抽出
 // する（CommonMark のリスト内容インデントはマーカー幅と入れ子の深さに依存する状態を持ち、行単位の判定
 // ではリスト継続行の取りこぼしとインデントコード例の誤抽出を両立して避けられないため）。
-// フィルタ（旧 DECLARED_DEPS_JQ）は scripts/lib/issue-jq.sh にあり、probe-declared-deps.sh が使う（Issue #300 の追跡:
+// フィルタ（旧 DECLARED_DEPS_JQ）は scripts/lib/issue-jq.sh にあり、probe-declared-deps.sh が使う（利用側のリポジトリで観測した権限確認によるランの停止への対応:
 // 約 3 KB の式をコマンド行に埋め込むと Claude Code の権限確認が出るため）。単一引用符を含めない（jq の \u0027 で表す）。
 // 1 エージェントあたりの対象件数。転記量を抑えて取りこぼしを減らし、ホスト側の全件照合で検出する。
 const DECLARED_DEPS_CHUNK_SIZE = 40
@@ -3807,7 +3807,7 @@ function isValidBranchName(b) {
 // 目的外）。信頼モデルの全文は references/script-trust-model.md。
 // スクリプト実行前のハッシュ照合は run-verified.sh が行う。期待ハッシュはビルダーが生成物へ埋め込む
 // （開発ファイルには置換前の目印を書く。build-workflow.mjs の embedScriptHashes）。
-// 測定以外のスクリプト（state-*.sh・fetch-*.sh・probe-*.sh・detect-external-checks.sh。Issue #300 の追跡）は、
+// 測定以外のスクリプト（state-*.sh・fetch-*.sh・probe-*.sh・detect-external-checks.sh。利用側のリポジトリで観測した権限確認によるランの停止への対応）は、
 // 状態ファイル・GitHub の読み書きのシェルをエージェントに組み立てさせないための固定手順で、封筒は使わず旧プロンプトの
 // コマンドと同じ形式で出力する（ホストの照合は変えていない）。
 const SCRIPT_SHA256 = {

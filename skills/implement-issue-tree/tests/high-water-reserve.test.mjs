@@ -28,7 +28,7 @@ const SCRIPT_PATH = join(
 const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 
 const source = readFileSync(SCRIPT_PATH, 'utf8')
-// 状態ファイルへの書き込みの jq の式は同梱スクリプト（scripts/state-write.sh）にある（Issue #300 の追跡）
+// 状態ファイルへの書き込みの jq の式は同梱スクリプト（scripts/state-write.sh）にある（利用側のリポジトリで観測した権限確認によるランの停止への対応）
 const STATE_WRITE = readFileSync(join(dirname(SCRIPT_PATH), 'state-write.sh'), 'utf8')
 const markerIndex = source.indexOf(DRIVER_MARKER)
 if (markerIndex < 0) {

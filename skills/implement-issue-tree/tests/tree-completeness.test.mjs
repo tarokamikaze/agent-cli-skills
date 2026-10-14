@@ -97,7 +97,7 @@ function treePrompt() {
   return driverPart.slice(start, end)
 }
 
-// ツリーの取得は同梱の fetch-tree.sh が行い（Issue #300 の追跡）、プロンプトはその 1 コマンドと出力の転記だけを指示する。
+// ツリーの取得は同梱の fetch-tree.sh が行い（利用側のリポジトリで観測した権限確認によるランの停止への対応）、プロンプトはその 1 コマンドと出力の転記だけを指示する。
 // 取得の手順（closed も辿る・total 0 のみ leaf・全ページ取得・件数の自己点検）はスクリプト側で固定する
 // （偽の gh での実行は issue-scripts.test.mjs）。
 test('(f) Tree 取得プロンプトは fetch-tree.sh の 1 コマンドを指示し、スクリプトは closed も辿る・total 0 のみ leaf・全ページ取得する', () => {

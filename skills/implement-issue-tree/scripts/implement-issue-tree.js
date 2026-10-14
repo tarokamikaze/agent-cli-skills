@@ -3811,25 +3811,25 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'118697bb4a1861b5e7929740c4aaf2d222bcb84c17e0e5525032c20aa4633ba0',
-'measure-free-disk.sh':'e6c02385997455085dd326c02a3031f5b1b63516176d5af74d8b805d9eebf392',
-'state-verify.sh':'01b2f04aa6ede7ec4251c845a32b141594bd2082aeef6f39dbf2dcd7b4a3ae2d',
-'state-read.sh':'1ff65256cce251ce8dffcca950226da593c2a710884846ba194ece332feb3878',
-'state-write.sh':'66cefef51fd201efdebe4eda923ab1e6962f9e92c894b7699fd38e610d8f7ecd',
-'fetch-tree.sh':'f28f4cccebf22e6d0025a1549199923a4fba6451bb35888397dc933175d6c7b8',
-'fetch-root-ancestors.sh':'73d248029719ffb42c0a5b780a9e3499bf0af741ab997aab2c07d229bb541137',
-'probe-declared-deps.sh':'8d6d1ae56041be261dee46006ba927f80cb8a64f4dee8f2b0f985aac24837ac8',
-'probe-prereqs.sh':'ce731ba090736234dbbcb5159e02d330ae7d4fb50dbc73a03bd7f90cfda8edb1',
-'detect-external-checks.sh':'2ce7c1752df4d2fc2407c0834d791a5e9c722db21c1388e9a3648c5152e37d5d',
+'measure-residual-bytes.sh':'b0a59f4aaec295b8c09403f9ba709e3291b0a430b9303ae4c1e569994e246123',
+'measure-free-disk.sh':'3e7cb8fcbee7d98ab1834f088b41c9b9eee63dd95945318598c45745538d0c85',
+'state-verify.sh':'2a9eb6d0d5b9f46e93d48dcd905d253eee0741d072f917175ae930b4b9694bfe',
+'state-read.sh':'b0d70da645a637cbd191fcd5c385cadfad24fac5a0e7fc3bb1c8ff1674ef206c',
+'state-write.sh':'5cee0f80bef0dd5dd430368a2fc6a9c026d4a3b06635fce0ad21d193b93f75e4',
+'fetch-tree.sh':'903433b8f8d540b1bdcee9b1d1f6281a04e5585339fcff9b1989de3035ed18c3',
+'fetch-root-ancestors.sh':'95e5f349f97f3e739c6529de86847fc083088d92644e90ff90c64d24354179c9',
+'probe-declared-deps.sh':'be06750f7d06115dfa8f5b043738a2698fe25c994e7e2f137a960401b3c7501b',
+'probe-prereqs.sh':'2e0ce161ee2245aadc2eda6589af300938388a319e8db7ca8c170b2328ec824e',
+'detect-external-checks.sh':'110bb3784219f4ea3262a557ce2ac17c31e7f54996c9d9ca20eca041c48f9a12',
 
-'nonce-seed.sh':'f5536e1e3b2b7b97cbd9b371cb773096fffbe781a513739c4db92e95c09a73b2',
-'checks-total.sh':'e9e726fe050df9c25ccd3ef90720fa7338e6373e636ed6f747565cd1c9f24910',
-'compare-files.sh':'62b0d4c46607a8bdf6064228fe5a84269a1c03b46c568bf9d03ad6767041f8f0',
-'external-check-runs.sh':'b509f25b7087c21da52cd9224580cc939a1c178f50788574225aa65130cc7f8d',
-'required-context-missing.sh':'bfc1b5f7eb54017798b258dddc7ec784deb20a587a4a6bb71c10344596347610',
-'unresolved-threads.sh':'ab51e3e0a85af6fc91fbb991384f8ca50ddaa75986ed9b22735869a01d555b64',
-'checks-state-counts.sh':'1bc3af2f9e7d2105faa4639f88b5bfcd614b0caa502aeed726628250c248f80d',
-'review-state-counts.sh':'2574388a437a6a682b30958eb1c06a32a3720cea7151cbc84b04d157b708458c',
+'nonce-seed.sh':'b3f09b281b81606c8d28b54b2e89ac67a15a9acecf9a2621b544659c9f41064c',
+'checks-total.sh':'dbca7621ad6ca2868c10a3b81002f74575e92272945ec5152c47c7adf9565880',
+'compare-files.sh':'2b2ae55f3ce177e65d97a6850f7279f33362bc5f43d78a88370aa6e4565665b3',
+'external-check-runs.sh':'5ee93f93b6eb356c22fffd961d43cdb6512df9a788c9e9b99f600333d7ab7cf7',
+'required-context-missing.sh':'e4ee5ffb979e01335df3c982e111219ddd9d1a858132b323f13d1475bf47e542',
+'unresolved-threads.sh':'2ea27985ec58ce132e79d6cbaf9a343fc4757dd7a46f72c9bee203a158995814',
+'checks-state-counts.sh':'41854b54f120f3d0862ffd54b0cdc6951455fff3ff2ddde07afde4c96aa16664',
+'review-state-counts.sh':'8f0be6d984caaee1462c7c1dac85026163050400da87905cec0f930ac3899d2d',
 }
 
 
