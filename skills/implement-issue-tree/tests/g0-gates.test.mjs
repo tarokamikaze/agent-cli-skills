@@ -441,18 +441,16 @@ test('fixPrompt: pushAfterFix の両分岐で commitlint 事前確認の指示�
 // monitor / merge-exec / merge-verify / Review ループの fix には現れないことを固定する。
 // ---------------------------------------------------------------------------
 
-// resolveReviewThread mutation の指示行の有無が「resolve 実行主体か」の判定基準。
-const RESOLVE_MUTATION_MARKER = 'resolveReviewThread'
+// resolve を実行する指示（resolveReviewThread mutation を送る同梱の resolve-thread.sh の起動。Issue #11 で mutation の
+// コマンド行をスクリプトへ移した）の有無が「resolve 実行主体か」の判定基準。
+const RESOLVE_MUTATION_MARKER = 'resolve-thread.sh'
 
-test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の resolveReviewThread mutation 指示と resolvedThreadIds 報告を含む', () => {
+test('fixPrompt: pushAfterFix=true はリモート head 反映済み前提の resolve 指示（resolve-thread.sh）と resolvedThreadIds 報告を含む', () => {
   mod.__setBoundaryNonceSeedForTest('a'.repeat(64))
   const finding = { summary: 'テスト用の指摘', unresolvedComments: [{ threadId: 'PRRT_abc123', text: '指摘テキスト' }] }
   const prompt = fixPrompt(item, { ...impl, branch: 'fix/42-noop' }, finding, true)
-  assert.ok(prompt.includes(RESOLVE_MUTATION_MARKER), 'pushAfterFix=true の fixPrompt に resolveReviewThread mutation の指示がない')
-  assert.ok(
-    prompt.includes(`gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`),
-    'resolve mutation のコマンド形が期待どおりでない',
-  )
+  assert.ok(prompt.includes(RESOLVE_MUTATION_MARKER), 'pushAfterFix=true の fixPrompt に resolve の指示がない')
+  assert.match(prompt, /run-verified\.sh' \S+ resolve-thread\.sh <threadId>/, 'resolve のコマンド形が期待どおりでない')
   assert.ok(prompt.includes('resolvedThreadIds'), 'resolve 済み threadId の報告フィールド（resolvedThreadIds）の指示がない')
   // resolve の前提条件: (a) 今回 push 成功、または (b) ホストが決定的に算出した許可リスト
   // （resolveProof。Issue #430）。fix 自身の反映確認・一覧再取得での対象拡大は禁止する文言を

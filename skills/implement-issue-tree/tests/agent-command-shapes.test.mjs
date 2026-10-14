@@ -162,6 +162,23 @@ test('範囲 A で同梱スクリプト・単独のコマンドへ移した箇�
   assert.ok(all.includes('required-context-missing.sh release%2Fv1.2 <HEAD sha>'), 'ベースブランチは URL エンコードして渡す')
 })
 
+test('範囲 C で同梱スクリプトへ移した書き込み（PR 本文・コメント・resolve）と opt-in 記録の確認が、マトリクスで組み立てられている', () => {
+  const all = collected.recorded.join('\n')
+  for (const name of ['pr-body-edit.sh', 'optin-record-count.sh', 'pr-comment.sh', 'resolve-thread.sh']) {
+    assert.ok(all.includes(` ${name}`), `${name} を起動するコマンドが組み立てられていない`)
+  }
+  // opt-in テストのコマンドは空白を %20 にして渡す（引用符を使わない）
+  assert.ok(all.includes('pr-body-edit.sh optin 1005 <sha> <results> make%20e2e'), 'fix の手順 4b')
+  assert.ok(all.includes('pr-body-edit.sh ensure <番号> 5 --oos '), 'PR 作成の手順 1c（対象外節あり）')
+  assert.ok(all.includes(' --optin <sha> <results> make%20e2e'), 'PR 作成の手順 1c（opt-in 記録節）')
+  assert.ok(all.includes('optin-record-count.sh 1005 make%20e2e'), 'マージ前の opt-in 記録の確認')
+  assert.ok(all.includes('pr-body-edit.sh oos-append 1005 '), 'fix の手順 6')
+  assert.ok(all.includes('resolve-thread.sh <threadId>'), 'fix の手順 5')
+  for (const c of collected.recorded.filter((x) => /pr-body-edit|optin-record-count|pr-comment|resolve-thread/.test(x))) {
+    assert.doesNotMatch(c.replace(/^bash '[^']+'/, ''), /["'{}]/, `引数に引用符・{} を含めない: ${c}`)
+  }
+})
+
 // --- 静的な走査 ---
 
 // まだ直していない範囲（Issue #11 の範囲 B〜D）。直した PR で項目を消し、最後の PR で一覧を空にする。
@@ -187,27 +204,6 @@ const KNOWN_EXCEPTIONS = [
     rules: ['c'],
     match: /^HEAD_SHA="PLACEHOLDER"\nRSC=\$\(gh api --paginate --slurp "repos\/\{owner\}\/\{repo\}\/rules\/branches\/[^"]+" /,
     reason: 'マージの安全判定（G0）。g0-check.sh へ移す（範囲 B の PR）',
-  },
-  {
-    range: 'C',
-    where: 'prCreatePrompt 手順 1c（既存 PR の本文への Closes 行の追記）',
-    rules: ['c'],
-    match: /^grep -qF "Closes #\d+" "\$f" \|\| \{ echo; echo; echo "Closes #\d+"; \} >> "\$f"$/,
-    reason: 'PR 本文（未信頼の自由文）の書き込み。Write ツールでファイルに書き、スクリプトが SHA-256 を照合してから使う形へ移す（範囲 C の PR）',
-  },
-  {
-    range: 'C',
-    where: 'optinRecordRewriteLines（opt-in テスト記録の節の書き直し）',
-    rules: ['c'],
-    match: /^rc=\$\?; \[ "\$rc" -eq 0 \] && \[ -s "\$g" \] && mv "\$g" "\$f"$/,
-    reason: 'PR 本文の書き込み（opt-in 記録のゲート）。範囲 C の PR で書き込みごとスクリプトへ移す',
-  },
-  {
-    range: 'C',
-    where: 'optinRecordVerifyPrompt（opt-in テスト記録の件数の確認）',
-    rules: ['c'],
-    match: /^pass=\$\(grep -cxF -- "PLACEHOLDER" "\$g"\); rc=\$\?\nfail=/,
-    reason: 'opt-in 記録のゲート（PR 本文の読み取りと正規化）。書き込み側と同じ範囲 C の PR で移す',
   },
   {
     range: 'D',

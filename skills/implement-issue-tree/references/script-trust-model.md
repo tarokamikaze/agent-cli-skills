@@ -125,6 +125,39 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 
 回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする。
 
+## 第 4 弾: PR 本文・コメント・resolve の書き込み（Issue #11 の範囲 C）
+
+PR 作成・fix・Low 指摘のコメント・opt-in 記録の確認の agent に書かせていた、PR 本文（未信頼の自由文）を扱うシェル（`f=$(mktemp)`・`grep || { echo; echo; echo; }`・`grep -avE ... ; rc=$?; ... && mv`・`pass=$(grep -cxF ...); rc=$?`・HEREDOC・`gh pr edit --body-file`）と、`{}` と引用符が同居する resolve の mutation を、同梱スクリプトへ移した。
+
+| スクリプト | 置き換えた手順 | 出力 |
+|------------|----------------|------|
+| `pr-body-edit.sh ensure` | PR 作成の手順 1c（既存 PR の再利用時の本文の補正: Closes 行・対象外節・opt-in 記録節） | `OK`、失敗は標準エラーの `FAILED: <理由>` と exit 1 |
+| `pr-body-edit.sh optin` | fix の手順 4b（opt-in 記録節の書き直し） | 同上 |
+| `pr-body-edit.sh oos-append` | fix の手順 6（対象外の指摘の記録） | 同上 |
+| `optin-record-count.sh` | マージ前の opt-in 記録の確認（本文の正規化と `grep -cxF` の 3 本） | `HEAD <sha>` と `COUNT <index> <pass> <nonPass>` の行（旧手順と同じ件数）。取得失敗は何も出さず exit 1 |
+| `pr-comment.sh` | 最終 Review の Low 指摘のコメント（`--body "$(cat <<'LOWEOF' ...)"`） | `gh pr comment` の出力 |
+| `resolve-thread.sh` | fix の手順 5（resolve の GraphQL mutation） | `gh api graphql` の出力と終了コード |
+
+未信頼の自由文の扱い:
+
+- コマンド行にも HEREDOC にも載せない。ホストが内容を知っている自由文（Low 指摘のコメント本文・PR 作成時の対象外節）は、`state-write.sh` の patch と同じ形にした。agent が Write ツールでカレントディレクトリの `.implement-issue-tree-<nonce>.md` に書き、スクリプトが自分の一時ファイルへ写してから `SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容〔末尾の改行を除く〕)` をホストの渡した値と照合し、一致したときだけ使う（束縛先はコメントなら PR 番号、対象外節なら issue 番号）。ファイルは成否に関わらず消す。nonce は内容から導出し（`fileNonce`）、プロンプトでのデータ境界のトークンにも使う（内容に自分自身のハッシュを含めることはできないので、境界を偽装できない）
+- fix が自分で書く対象外の行は、ホストが内容を知らないので照合値が無い。`oos-append` は代わりに行の形（`- [threadId: <threadId>] <本文>`・20 行以内・1 行 2000 バイト以内）と、threadId がホストの渡した未解決スレッドの一覧にあることを確かめる
+- 既存の PR 本文はスクリプトの中だけで扱い、agent のコンテキストに入れない。opt-in テストのコマンドは空白を `%20` にして引数で渡す（ホストの許可文字集合に引用符・`$`・`%` は無い）
+
+本文の全文を置き換える書き戻しは fail-closed にした: 取得の失敗・補正後が空・取得した本文にあった `Closes #` の行や対象外の見出しが補正後に無い、のいずれかなら `gh pr edit` を呼ばない。書き戻したあとは本文を取り直し、足したもの（Closes 行・対象外の見出しと各 threadId・記録節の各マーカー行）があることを確かめ、無ければ失敗を返す。
+
+信頼の水準は旧プロンプトと同じで、変えていない。照合値は写し間違い・流用の検出であって、悪意のある agent への認証ではない（第 2 弾と同じ）。マージ前の opt-in 記録の判定は、旧手順と同じくホストの `classifyOptinRecordGate` と `combineOptinRecordGate`（ホストが保持する直近の fix の実測を重ねる）が行う。
+
+旧手順と違う点（互換性の注記）:
+
+- opt-in 記録節の書き直しで、除去後に空白以外の文字が残らない本文も失敗にした（旧手順は `[ -s "$g" ]` だけで、`gh` の出力の末尾の改行が残るため、記録節だけの本文を空行 1 つに置き換え得た）
+- PR 作成の手順 1c の取得は `--jq '.body // ""'` にした（旧手順は `--jq .body` で、本文が null のとき `null` の文字列を本文として扱い得た）。null 以外では同じ
+- PR 作成の手順 1c も、書き戻したあとに反映を確かめる（旧手順は fix の手順 4b・6 だけが確かめていた）
+- 対象外節の追記は旧手順では agent に任せていた形を、`ensure` は空行 1 つと節、`oos-append` は節の末尾（次の見出しの手前）への行の追加に固定した
+- `resolve-thread.sh` は threadId を `-f`（文字列）で渡す（旧手順の `-F` は数値・真偽値に見える値を型変換する）。mutation は同じ
+
+回帰防止: `tests/write-scripts.test.mjs` が、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`pr edit` は `--body-file` の内容で本文を置き換え、`pr comment` は本文を記録する）で同じ入力に対して旧コマンドとスクリプトを実行し、書き戻した本文・投稿した本文・件数・mutation が一致することと、照合・fail-closed の分岐を確かめる。ホストのプロンプトから Write する内容とコマンドを取り出して流す確認も含む。
+
 ## 関連
 
 - `./automerge-design.md` — G0 とサーバー側強制（安全判定の信頼境界）
