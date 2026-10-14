@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
+import { requestedNumbers, STUB_SKILL_DIR } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
   dirname(fileURLToPath(import.meta.url)),
@@ -187,15 +188,20 @@ test('writeBlockedStateBatch: 同一 patch は numbers へ束ね、PR を持つ�
   assert.equal('pr' in groups[1].patch, false, '保存済み pr を消さない')
 })
 
-test('writeBlockedStateBatch: プロンプトは未信頼範囲の境界・TEMP_FILE_POLICY を含み、jq は --slurpfile で値を渡す', async () => {
+test('writeBlockedStateBatch: プロンプトは未信頼範囲の境界・TEMP_FILE_POLICY を含み、JSON はコマンド行に載せず Write ツールの patch ファイルと state-write.sh merge-groups で渡す', async () => {
   const { calls } = installAgentStub(() => ({ ok: true }))
   await writeBlockedStateBatch(entriesOf(1, 2, BLOCKED), {})
   const p = calls[0].prompt
-  assert.match(p, /UNTRUSTED_[0-9a-z]+_BEGIN/)
+  const nonce = /UNTRUSTED_([0-9a-z]+)_BEGIN/.exec(p)[1]
   assert.match(p, /UNTRUSTED_[0-9a-z]+_END/)
   assert.match(p, /一時ファイル配置規則/)
-  assert.match(p, /jq --slurpfile groups "\$groups_file"/)
-  assert.match(p, /cat <<'GROUPS_EOF_[0-9a-z]+' > "\$groups_file"/)
+  const json = p.split('\n').find((l) => l.startsWith('[{"numbers"'))
+  // コマンドは 1 行で、patch の SHA-256（ホストが渡した JSON 1 行の値）と nonce を引数に持つ
+  const cmd = p.split('\n').find((l) => l.includes('state-write.sh merge-groups'))
+  assert.ok(cmd.endsWith(`state-write.sh merge-groups _/issue-trees/1.json ${nonce} ${sha256Hex(json)}`), cmd)
+  assert.ok(p.includes(`Write ツールで、カレントディレクトリ（メイン worktree）の _/issue-trees/1.json.patch-${nonce}.json に`))
+  // HEREDOC・mktemp・jq をエージェントに組み立てさせない
+  assert.doesNotMatch(p, /<<'|\$\(mktemp|jq --slurpfile/)
 })
 
 test('writeBlockedStateBatch: haiku が未返却なら同一プロンプトで sonnet へ 1 回フォールバックする（#493 の対象に含まれる）', async () => {
@@ -339,13 +345,11 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
-      const m = /for n in ([0-9 ]+); do/.exec(prompt)
-      return { entries: m[1].trim().split(' ').map(Number).map((n) => ({ number: n, deps: [], sig: declaredDepsChecksum(n, []) })) }
+      return { entries: requestedNumbers(prompt).map((n) => ({ number: n, deps: [], sig: declaredDepsChecksum(n, []) })) }
     }
     if (label.startsWith('plan:root-ancestors')) return { fetched: true, chain: [{ number: args.parent, parent: 0 }] }
     if (label.startsWith('plan:out-of-tree-deps')) {
-      const m = /for n in ([0-9 ]+); do/.exec(prompt)
-      return { entries: m[1].trim().split(' ').map(Number).map((n) => ({ number: n, state: ootStates[n] ?? 'OPEN', sig: outOfTreeStateChecksum(n, ootStates[n] ?? 'OPEN') })) }
+      return { entries: requestedNumbers(prompt).map((n) => ({ number: n, state: ootStates[n] ?? 'OPEN', sig: outOfTreeStateChecksum(n, ootStates[n] ?? 'OPEN') })) }
     }
     if (label === 'state:init-all') return { ok: true }
     if (/^state:update-batch:\d+/.test(label)) return { ok: batchOk(label) }
@@ -357,8 +361,8 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     return handler(prompt, opts)
   }
   const fn = new AsyncFunction('args', 'agent', 'log', 'phase', scriptBody)
-  // skillDir は残置バイト軸が有効な通常ランの必須引数（Issue #603）。呼び出し側の指定があればそれを優先する
-  const result = await fn({ skillDir: '/opt/skills/implement-issue-tree', ...args }, agent, (m) => { logs.push(m) }, () => {})
+  // skillDir は全ランの必須引数（状態ファイル・ツリー取得の同梱スクリプトの場所）。呼び出し側の指定があればそれを優先する
+  const result = await fn({ skillDir: STUB_SKILL_DIR, ...args }, agent, (m) => { logs.push(m) }, () => {})
   return { result, calls, logs }
 }
 

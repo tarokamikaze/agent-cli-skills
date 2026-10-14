@@ -477,11 +477,11 @@ async function runDriver(args) {
   return { error, calls }
 }
 
-test('起動時: 残置バイト軸が有効（既定）で dryRun でないランは、skillDir 未指定ならエージェントを 1 回も呼ばずエラーで停止する', async () => {
+test('起動時: skillDir 未指定のランはエージェントを 1 回も呼ばずエラーで停止する（全ランで必須）', async () => {
   const { error, calls } = await runDriver({ parent: 1 })
   assert.ok(error, 'エラーで停止する')
   assert.match(error.message, /args\.skillDir にはスキルディレクトリ.*絶対パスを渡す/)
-  assert.match(error.message, /dryRun: true か maxResidualWorktreeBytes: 0/)
+  assert.match(error.message, /全ランで必須/)
   assert.deepEqual(calls, [])
 })
 
@@ -493,10 +493,12 @@ test('起動時: skillDir の形式不正は、他の引数より先に起動時
   }
 })
 
-test('起動時: dryRun: true または maxResidualWorktreeBytes: 0 のランは skillDir を省略できる（測定スクリプトを使わない）', async () => {
+// 状態ファイルの読み書き・ツリー取得も同梱スクリプトで行うため、測定を使わないランでも省略できない
+test('起動時: dryRun: true や maxResidualWorktreeBytes: 0 のランでも skillDir は省略できない（状態ファイル・ツリー取得のスクリプトを使う）', async () => {
   for (const args of [{ parent: 1, dryRun: true }, { parent: 1, maxResidualWorktreeBytes: 0, maxResidualWorktrees: 0 }]) {
-    const { error } = await runDriver(args)
-    assert.ok(!error || !/skillDir/.test(error.message), `${JSON.stringify(args)}: ${error?.message}`)
+    const { error, calls } = await runDriver(args)
+    assert.ok(error && /args\.skillDir にはスキルディレクトリ/.test(error.message), `${JSON.stringify(args)}: ${error?.message}`)
+    assert.deepEqual(calls, [])
   }
 })
 
