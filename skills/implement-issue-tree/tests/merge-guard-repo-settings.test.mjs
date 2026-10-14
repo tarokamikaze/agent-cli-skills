@@ -80,7 +80,8 @@ const DENY = [
 ]
 
 const ALLOW = [
-  // G0（merge-exec 手順 2b）が実際に実行する読み取りと同形
+  // G0（merge-exec 手順 2b）が実際に実行するコマンド（同梱の g0-check.sh の起動）と、スクリプトの中で行う読み取りと同形
+  `bash '/opt/skills/implement-issue-tree/scripts/run-verified.sh' ${'0'.repeat(64)} g0-check.sh main ${'a'.repeat(40)} cursor:Cursor%20Bugbot`,
   `gh api --paginate --slurp "repos/{owner}/{repo}/rules/branches/main" | jq '[.[][] | select(.type == "required_status_checks")] | length'`,
   `gh api "repos/{owner}/{repo}/rulesets/<id>" --jq '.bypass_actors | type == "array" and length == 0'`,
   'gh api repos/o/r/rulesets/123 --jq .enforcement',
