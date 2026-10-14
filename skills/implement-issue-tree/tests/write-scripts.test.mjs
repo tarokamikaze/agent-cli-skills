@@ -26,7 +26,11 @@ const FAKE_GH = readFileSync(join(HERE, 'lib', 'fake-gh.sh'), 'utf8')
 const defs = await importDefinitions([
   'lowFindingsCommentPrompt', 'prCreatePrompt', 'optinRecordMarkerLine', 'renderOptinRecordSection',
   'statePatchSha256', 'fileNonce', 'OPTIN_RECORD_HEADING', 'OPTIN_RECORD_MARKER_PREFIX', 'OPTIN_RECORD_HUMAN_PREFIX',
+  'ensureBoundaryNonceSeed', 'implementPrompt', 'recoverImplementPrompt', 'fixPrompt', 'WRITTEN_FILE_COMMIT_GUARD',
 ], 'write-scripts')
+// fixPrompt は境界トークンの seed を要する。seed の agent だけを stub にして入れる
+globalThis.agent = async () => ({ seedHex: 'c'.repeat(64) })
+await defs.ensureBoundaryNonceSeed()
 const { optinRecordMarkerLine, renderOptinRecordSection, OPTIN_RECORD_HEADING, OPTIN_RECORD_MARKER_PREFIX, OPTIN_RECORD_HUMAN_PREFIX } = defs
 
 const SHA_A = 'a'.repeat(40)
@@ -116,8 +120,93 @@ test('ホストの照合値（statePatchSha256）と nonce（fileNonce）はス�
   assert.notEqual(defs.fileNonce('a'), defs.fileNonce('b'))
 })
 
+test('コミットを作る手順（Implement・recover-implement・fix・PR 作成と fix の base 取り込みの解消）は、git add の前に残った .implement-issue-tree-*.md を消させる', () => {
+  const guard = defs.WRITTEN_FILE_COMMIT_GUARD
+  assert.ok(guard.includes('rm -f -- .implement-issue-tree-*.md') && guard.includes('コミットに含めない'))
+  const item = { number: 5, title: 't' }
+  const impl = { prNumber: 1005, branch: 'feat/5-x', worktreePath: '/repo/wt/5' }
+  const finding = { summary: 's', unresolvedComments: [{ threadId: 'T1', text: 'x' }] }
+  for (const [name, p] of [
+    ['implement', defs.implementPrompt(item, 'plan')],
+    ['recover-implement', defs.recoverImplementPrompt(item, { done: '', remaining: '', broken: '' }, 'feat/5-x')],
+    ['fix（push する）', defs.fixPrompt(item, impl, finding, true)],
+    ['fix（push しない）', defs.fixPrompt(item, impl, finding, false)],
+  ]) {
+    assert.ok(p.includes(guard), name)
+  }
+  // PR 作成は自分でコミットを作るのが base 取り込みの解消だけなので、その git commit の手前で消させる
+  const pr = defs.prCreatePrompt(item, impl, [])
+  const at = pr.indexOf('rm -f -- .implement-issue-tree-*.md')
+  assert.ok(at > 0 && at < pr.indexOf('git commit --no-edit でコミットする', at), 'PR 作成の base 取り込みの解消で、git commit の前にある')
+  // 消す形は、Write したファイルだけを消し、ほかのファイルを残す
+  const dir = mkdtempSync(join(tmpdir(), 'iit-guard-'))
+  try {
+    for (const f of ['.implement-issue-tree-abc.md', '.implement-issue-tree-0f.md', 'keep.md', '.implement-issue-tree.md']) writeFileSync(join(dir, f), 'x')
+    const r = spawnSync('bash', ['-c', 'rm -f -- .implement-issue-tree-*.md'], { cwd: dir, encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+    assert.ok(!existsSync(join(dir, '.implement-issue-tree-abc.md')) && !existsSync(join(dir, '.implement-issue-tree-0f.md')))
+    assert.ok(existsSync(join(dir, 'keep.md')) && existsSync(join(dir, '.implement-issue-tree.md')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Low 指摘のコメント: ホストは本文の末尾の改行を除いてから nonce と照合値を計算する（findings が空でもスクリプトの照合と一致する）', () => {
+  for (const findings of ['', '指摘 A', ['指摘 B']]) {
+    const p = defs.lowFindingsCommentPrompt({ number: 5 }, 21, findings)
+    const [, nonce, hash] = p.match(/pr-comment\.sh 21 ([0-9a-z]+) ([0-9a-f]{64})/)
+    const text = p.split(`=== UNTRUSTED_${nonce}_BEGIN ===\n`)[1].split(`\n=== UNTRUSTED_${nonce}_END ===`)[0]
+    assert.doesNotMatch(text, /\n$/, JSON.stringify(findings))
+    assert.equal(hash, bound(nonce, 21, text.replace(/\n+$/, '')), JSON.stringify(findings))
+  }
+})
+
 for (const bash of BASHES) {
   const tag = `[${bash}]`
+
+  test(`${tag} pr-body-edit.sh oos-append: Issue を閉じる記法（closing keyword）を含む行は書き込まない`, () => {
+    const nonce = 'c'.repeat(32)
+    const line = (s) => `- [threadId: T1] ${s} — 理由: 範囲外 / 対応案: 別 PR（切り出し先 Issue: TBD）`
+    for (const s of [
+      'Closes #12', 'closes #12', 'FIXES #3', 'fixed: #7', 'Resolve #1', 'resolved  #99', 'see (fix #4)',
+      'Closes other-owner/other-repo#5', 'fixes https://github.com/o/r/issues/8', 'close\t#2',
+    ]) {
+      const g = setup()
+      g.setBody(4, 'Closes #1\n')
+      g.write(nonce, line(s))
+      const r = g.run(bash, 'pr-body-edit.sh', ['oos-append', '4', nonce, 'T1'])
+      assert.equal(r.status, 1, s)
+      assert.match(r.stderr, /Issue を閉じる記法/, s)
+      assert.equal(g.calls().length, 0, `${s}: gh を呼ばない`)
+      assert.ok(!g.written(nonce), `${s}: ファイルを残さない`)
+      g.done()
+    }
+    // closing keyword の形でないものは書ける
+    for (const s of ['fix の手順で直す', 'closes the gap (#12 とは別)', 'prefix #3', 'Issue #12 に関連', 'disclose #5 の扱い', 'unresolved #6']) {
+      const g = setup()
+      g.setBody(4, 'Closes #1\n')
+      g.write(nonce, line(s))
+      const r = g.run(bash, 'pr-body-edit.sh', ['oos-append', '4', nonce, 'T1'])
+      assert.equal(r.status, 0, `${s}: ${r.stderr}`)
+      assert.ok(g.body(4).includes(line(s)), s)
+      g.done()
+    }
+  })
+
+  test(`${tag} 端から端まで: findings が空の Low 指摘のコメントも照合を通って投稿できる`, () => {
+    const p = defs.lowFindingsCommentPrompt({ number: 5 }, 22, '')
+    const [, nonce, hash] = p.match(/pr-comment\.sh 22 ([0-9a-z]+) ([0-9a-f]{64})/)
+    const text = p.split(`=== UNTRUSTED_${nonce}_BEGIN ===\n`)[1].split(`\n=== UNTRUSTED_${nonce}_END ===`)[0]
+    const g = setup()
+    try {
+      g.write(nonce, `${text}\n`)
+      const r = g.run(bash, 'pr-comment.sh', ['22', nonce, hash])
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(readFileSync(join(g.dir, 'comment-22.md'), 'utf8'), text)
+    } finally {
+      g.done()
+    }
+  })
 
   test(`${tag} pr-body-edit.sh ensure: 旧手順 1c（取得・Closes 行の追記・記録節の書き直し・gh pr edit）と同じ本文を書き戻す`, () => {
     const commands = ['make e2e', 'go test ./...']

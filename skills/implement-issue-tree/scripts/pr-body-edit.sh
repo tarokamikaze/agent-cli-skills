@@ -21,7 +21,7 @@
 #   oos-append  fix の手順 6。agent が Write ツールで書いた対象外の行（1 件 1 行、
 #               「- [threadId: <threadId>] <本文>」の形。threadId は引数で渡した一覧のどれか）を、本文の
 #               「## 対象外（out-of-scope）」節の末尾へ足す（節が無ければ本文の末尾に節を作る）。本文に既にある threadId の
-#               行は足さない。足す行が無ければ書き戻さない
+#               行は足さない。足す行が無ければ書き戻さない。Issue を閉じる記法（Closes #N など）を含む行は拒否する
 #   <結果> は pass / fail / not-run をコマンドの順にカンマで並べたもの。<コマンド> は opt-in テストのコマンドの空白を %20 に
 #   したもの（ホストが組み立てる。引用符を使わないため）。
 #
@@ -48,6 +48,9 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 . "${script_dir}/lib/pr-write.sh" || exit 2
 
 OOS_HEADING='## 対象外（out-of-scope）'
+# GitHub の closing keyword（close・closes・closed・fix・fixes・fixed・resolve・resolves・resolved）の後に、任意のコロンと
+# 空白を挟んで Issue の参照（#N・owner/repo#N・https://github.com/owner/repo/issues/N）が続く形。grep -iE で使う
+CLOSING_KEYWORD_RE='(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+(([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+|https?://github[.]com/[^/[:space:]]+/[^/[:space:]]+/(issues|pull)/[0-9]+)'
 
 usage() {
   echo "使い方: pr-body-edit.sh {ensure|optin|oos-append} PR番号 引数..." >&2
@@ -178,6 +181,12 @@ if [ "${sub}" = oos-append ]; then
       [ "${a}" = "${t}" ] && ok=1
     done
     [ "${ok}" -eq 1 ] || fail "threadId（${t}）が未解決スレッドの一覧に無い"
+    # 行の本文は未信頼データ（指摘の要約など）。GitHub の closing keyword の形（Closes #N・fixes owner/repo#N・
+    # resolved: https://github.com/<owner>/<repo>/issues/N など。大文字小文字を問わない）を含むと、PR のマージ時に
+    # 無関係な Issue を閉じさせられるため、書き込まない
+    if printf '%s\n' "${l}" | grep -qiE "${CLOSING_KEYWORD_RE}"; then
+      fail "対象外の行に Issue を閉じる記法（close / fix / resolve の後の #番号・owner/repo#番号・Issue の URL）がある"
+    fi
     printf '%s\n' "${l}" >>"${work_dir}/add"
   done <"${section}"
   [ "${lines}" -ge 1 ] || fail "対象外の行が 1 行も無い"

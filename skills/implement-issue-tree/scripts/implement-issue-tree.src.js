@@ -1358,7 +1358,12 @@ const COMMON_LINES = [
 const COMMON = COMMON_LINES.join('\n')
 
 // impl / recover / fix の各コミットが共通で受ける commitlint 制約（Issue #290: scope-enum リポでの落ちを防ぐ）。
-const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選ぶ。always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う（先頭だけを見て諦めない）。never で全て拒否されたら change → update の順で拒否リストに無いものを使う。いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し（変更内容に最も近いものを優先。判断できなければ先頭から）、該当する列挙値が 1 つも無ければ scope を決定できないとして fail-closed にする（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が未設定 / never の場合に限り、同ブランチで既に hook を通過した直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値（同様に検証）の順で決める。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。`
+// Write ツールで書く一時ファイル（.implement-issue-tree-<nonce>.md。pr-comment.sh・pr-body-edit.sh が読んで消す）は、
+// agent がスクリプトを起動できなかった経路（hook の拒否・中断）では worktree のルートに残り、次のコミットの git add で
+// PR に混入しうる。コミットを作る手順（Implement・recover-implement・fix・PR 作成と fix の base 取り込みの解消）で、
+// git add の前に消させる（Issue #11）。
+const WRITTEN_FILE_COMMIT_GUARD = '   git add の前に、作業ツリーのルートに .implement-issue-tree-*.md（Write ツールで書く一時ファイル。同梱スクリプトが読んで消すが、スクリプトを起動できなかったときは残る）があれば、rm -f -- .implement-issue-tree-*.md を単独で実行して消す（コミットに含めない）。'
+const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選ぶ。always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う（先頭だけを見て諦めない）。never で全て拒否されたら change → update の順で拒否リストに無いものを使う。いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し（変更内容に最も近いものを優先。判断できなければ先頭から）、該当する列挙値が 1 つも無ければ scope を決定できないとして fail-closed にする（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が未設定 / never の場合に限り、同ブランチで既に hook を通過した直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値（同様に検証）の順で決める。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。\n${WRITTEN_FILE_COMMIT_GUARD}`
 
 // base merge subject の type / scope 決定規則。未信頼テキスト（commitlint 設定・コミット履歴）
 // の読取を伴うため、埋め込み先は検証権限付き経路（runVerification=true の pr-create / fix）に
@@ -1381,7 +1386,7 @@ function subjectDecisionRules(failPre, failPost) {
 function baseMergeInstruction(base, runVerification = true, hostSubject = '') {
   const commitTail = ` — subject は MERGE_MSG に残る上記のものを使う。この git commit --no-edit も pre-commit / commit-msg hook を通るため、非 0 終了（hook 拒否。MERGE_HEAD が残る）なら (c) と同じく git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す。--no-verify で強行せず、終了コードを無視して merge 前の HEAD を push してはならない）。`
   const resolveBranch = runVerification
-    ? `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
+    ? `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから（${WRITTEN_FILE_COMMIT_GUARD.trim().replace(/。$/, '')}）git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
     : `コンフリクト種別を問わず解消しない（内容編集の権限を持たない — build/lint/test 不可のため。submodule gitlink ポインタのコンフリクトも双方がポインタを変更した状態であり、base 側採用は PR 側の gitlink 更新を黙って破棄するため機械的に解消できない）。commit せず git merge --abort し、pushed: false・commitFailed: true・conflict: true・summary「base コンフリクト解消不能（内容編集の権限なし。fix/implement へ委譲要）」を返す（conflict: true はこのコンフリクト検出時のみ付ける。fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では conflict を付けない — ホストは conflict: true または hookRejected: true のとき検証権限を持つ fix 経路へ委譲する）。`
   const hookRejectReturn = runVerification
     ? '「base merge コミット拒否: <hook 出力の要旨>」を理由として返す'
@@ -4858,7 +4863,9 @@ function lowFindingsCommentPrompt(item, prNumber, findings) {
     '3 回目の Review ラウンドで残った以下の Low（要改善）指摘は、マージをブロックせず follow-up 候補として記録する。必要に応じて別 issue 化・後続 PR で対応すること。',
     '',
     sanitize(findings),
-  ].join('\n')
+    // pr-comment.sh は内容の末尾の改行を除いてから照合するので、ホストも除いてから nonce と照合値を計算する
+    // （findings が空だと末尾が改行になり、除かないと必ず不一致になる）
+  ].join('\n').replace(/\n+$/, '')
   const nonce = fileNonce(`low-comment:${prNumber}:${body}`)
   return [
     `イシュー #${item.number} の PR #${prNumber} に、最終 Review ラウンドで検出された Low（要改善）指摘をコメントとして記録するエージェント。`,
