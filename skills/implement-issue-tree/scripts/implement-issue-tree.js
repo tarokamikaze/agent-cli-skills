@@ -3811,7 +3811,7 @@ const SCRIPT_SHA256={
 'checks-state-counts.sh':'41854b54f120f3d0862ffd54b0cdc6951455fff3ff2ddde07afde4c96aa16664',
 'review-state-counts.sh':'8f0be6d984caaee1462c7c1dac85026163050400da87905cec0f930ac3899d2d',
 
-'worktree-cleanup.sh':'813953b99295a3ed7e7aa51e2a87840d2e0be59a4e6484e1681cffddef05979e',
+'worktree-cleanup.sh':'d583c21df1206fdc3ef0a9e7a8146b3186f14cce56622359e472d6e71c5d48d6',
 'discard-safety.sh':'cc62346762da335fc337dc2d9a874fc94951f116cac608e96f44dee2fc6ec22b',
 }
 

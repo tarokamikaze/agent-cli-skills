@@ -142,7 +142,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - 削除の安全判定（登録済みの worktree か・メイン worktree とその配下でないか・状態ファイルの保持対象でないか）は、スクリプトが削除の直前に git と状態ファイルから自分で取り直して行い、agent が転記した値を使わない（「測定値の使い方」の (c)）。旧手順では agent が同じ判定をその場で組み立てたシェルで行っていたので、判定を agent の書き方に依存させない分だけ強くなる
 - スクリプトに渡すのは、ホストが `sanitizeWorktreePath`・`isValidBranchName` で検証したパスとブランチ名だけで、スクリプトも同じ規則で検査し直す（不正は exit 2 で何も消さない）。パスは半角スペースを許すため単一引用符で包む（引用符・展開の文字は検証で除外済み）
 - スイープの候補一覧は、agent が Write ツールで `<状態ファイル>.sweep-<nonce>.json` に書き、スクリプトが `SHA-256(nonce + 改行 + sweep + 改行 + 内容)`（ホストの `statePatchSha256(nonce, 'sweep', 一覧)`）を照合してから使う。写し間違い・別の呼び出しの一覧の流用は、何かを消す前に止まる。候補ファイルは成否・引数の誤りに関わらず消す
-- 迷ったら消さない: `git rev-parse --show-toplevel` が失敗したら `rm -rf` しない、`git worktree list` を取れなければ何も消さない、`discard-safety.sh` は `git worktree list` が失敗したら `DIRTY true`（ホストは削除しない）
+- 迷ったら消さない: `git rev-parse --show-toplevel` が失敗したら `rm -rf` しない、メイン worktree の配下は cwd の toplevel だけでなく `git worktree list` の先頭の実パスでも判定する（リンク worktree の中から起動されても配下を消さない。その実パスを取れなければ `rm -rf` しない）、`git worktree list` を取れなければ何も消さない、`discard-safety.sh` は `git worktree list` が失敗したら `DIRTY true`（ホストは削除しない）
 - agent が転記する値（`REMOVED` の行・`dirty`）の扱いは旧手順と同じ。`dirty` は Recover の `wipCommitted` の申告とあわせた 2 層の削除ゲートの片方で、旧手順でも agent の観測の転記だった。スクリプトにしたことで、観測のコマンドを agent が書き間違える余地が無くなる
 - 独立した検証として、`tests/cleanup-scripts.test.mjs` が実際の git で一時リポジトリと worktree を作り、旧プロンプトのシェル（テスト内に固定文字列で持つ）とスクリプトを同じ構成のリポジトリに流して、残ったファイル・`git worktree list`・ブランチが一致することを確かめる。対象は通常・locked・`.git` が壊れて `rm -rf` へ進むもの・未登録・実体の無い登録・メイン worktree の配下・実パスがメイン worktree になるシンボリックリンク・未コミットの変更・半角スペースを含むパス・状態ファイルの保持対象（failed / blocked / monitoring）。ホストが組み立てたコマンド（引用・照合値）をそのままスクリプトが受け付けることも同じテストで流して確かめる
 
