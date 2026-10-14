@@ -1,5 +1,5 @@
 #!/bin/bash
-# fake-gh.sh — テスト用の偽の gh（issue-scripts.test.mjs・ci-scripts.test.mjs が PATH の先頭に gh として置く）
+# fake-gh.sh — テスト用の偽の gh（issue-scripts.test.mjs・ci-scripts.test.mjs・g0-check.test.mjs が PATH の先頭に gh として置く）
 #
 # 引数から fixture のファイル名（$FAKE_GH_DIR/<key>.json）を決め、--jq があれば本物の jq（-r -c。gh の --jq と同じく
 # 文字列は生、値は 1 行の JSON）で適用して出す。
@@ -47,6 +47,7 @@ case "${args[0]} ${args[1]}" in
     done
     ;;
   'api rate_limit') key=rate ;;
+  api\ apps/*) key="app-${args[1]#apps/}" ;;
   'pr list') key=prlist ;;
   'pr checks') key="prchecks-${args[2]}" ;;
   'issue view') key="view-${args[2]}" ;;
@@ -104,6 +105,7 @@ case "${args[0]} ${args[1]}" in
         ;;
       compare/*) key="compare-${p#compare/}" ;;
       rules/branches/*) key="rules-${p#rules/branches/}" ;;
+      rulesets/*) key="ruleset-${p#rulesets/}" ;;
       pulls/*/reviews)
         n=${p#pulls/}
         key="reviews-${n%%/*}"

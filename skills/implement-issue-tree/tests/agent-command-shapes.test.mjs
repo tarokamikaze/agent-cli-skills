@@ -183,6 +183,18 @@ test('範囲 C で同梱スクリプトへ移した書き込み（PR 本文・�
   }
 })
 
+test('範囲 B（merge-exec の G0 とマージの実行）を g0-check.sh と単独の gh pr merge へ移したコマンドが組み立てられている', () => {
+  const all = collected.recorded.join('\n')
+  assert.ok(collected.recorded.some((c) => c.endsWith(' g0-check.sh main <HEAD sha>')), '外部チェックなし確定は slug:context の引数なし')
+  assert.ok(all.includes(' g0-check.sh release%2Fv1.2 <HEAD sha> cursor:Cursor%20Bugbot'), 'ベースブランチは URL エンコード、context は %XX エンコード')
+  assert.ok(all.includes(' g0-check.sh main <HEAD sha> cursor:Cursor%20Bugbot sonarcloud:SonarCloud%20Code%20Analysis'), '複数 App は宣言の順に App ごと')
+  assert.ok(collected.recorded.includes('gh pr merge 1005 --squash --delete-branch --match-head-commit <HEAD sha>'), '手順 5 は sha を値で埋め込む単独のコマンド')
+  // マージは変数の代入・連結なしの 1 本だけ
+  for (const c of collected.recorded.filter((x) => x.includes('gh pr merge'))) {
+    assert.match(c, /^gh pr merge \d+ --squash --delete-branch --match-head-commit <HEAD sha>$/)
+  }
+})
+
 test('範囲 D で同梱スクリプト・単独のコマンドへ移した箇所が、マトリクスで実際に組み立てられている', () => {
   const all = collected.recorded.join('\n')
   for (const part of [
@@ -208,31 +220,12 @@ test('範囲 D で同梱スクリプト・単独のコマンドへ移した箇�
 
 // --- 静的な走査 ---
 
-// まだ直していない範囲（Issue #11 の範囲 B〜D）。直した PR で項目を消し、最後の PR で一覧を空にする。
-// match は検出した断片（extractCommandCandidates の 1 行の切り出し、または extractCommandBlocks の複数行の塊）に当てる正規表現
-const KNOWN_EXCEPTIONS = [
-  {
-    range: 'B',
-    where: 'mergeExecutePrompt 手順 2b (i-b)（ruleset の bypass_actors の確認）',
-    rules: ['d'],
-    match: /^gh api "repos\/\{owner\}\/\{repo\}\/rulesets\/PLACEHOLDER" --jq '\.bypass_actors \| type == "array" and length == 0'$/,
-    reason: 'マージの安全判定（G0）。判定の結果と順序を変えずに g0-check.sh へまとめて移す（範囲 B の PR）',
-  },
-  {
-    range: 'B',
-    where: 'mergeExecutePrompt 手順 2b (v)（required に含まれない check-run・commit status の件数）',
-    rules: ['c'],
-    match: /^HEAD_SHA="PLACEHOLDER"\nREQ=\$\(gh api --paginate --slurp "repos\/\{owner\}\/\{repo\}\/rules\/branches\/[^"]+" \| jq -c '\[\.\[\]\[\] \| select\(\.type == "required_status_checks"\) \| \.parameters\.required_status_checks\[\]\.context\] \| unique'\)\n/,
-    reason: 'マージの安全判定（G0）。required context の取得は lib/gh-read.sh の gr_required_contexts と共用できる形にしてあり、g0-check.sh へ移す（範囲 B の PR）',
-  },
-  {
-    range: 'B',
-    where: 'mergeExecutePrompt 手順 2b (v-b)（required status checks の発行元束縛）',
-    rules: ['c'],
-    match: /^HEAD_SHA="PLACEHOLDER"\nRSC=\$\(gh api --paginate --slurp "repos\/\{owner\}\/\{repo\}\/rules\/branches\/[^"]+" /,
-    reason: 'マージの安全判定（G0）。g0-check.sh へ移す（範囲 B の PR）',
-  },
-]
+// まだ直していない範囲の既知の例外（Issue #11）。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に、
+// 範囲 C〔PR 本文・コメント・resolve の書き込み〕は pr-body-edit.sh・optin-record-count.sh・pr-comment.sh・resolve-thread.sh に、
+// 範囲 D〔削除と終了時の処理〕は worktree-cleanup.sh・discard-safety.sh に移したので、一覧は空。新しい例外は足さない
+// （足すときは range・where・rules・match・reason を持たせる。match は検出した断片〔extractCommandCandidates の 1 行の
+// 切り出し、または extractCommandBlocks の複数行の塊〕に当てる正規表現）
+const KNOWN_EXCEPTIONS = []
 
 // コマンドではない文、または agent に実行させない例（やってはいけない例の説明など）
 const ALLOWED_TEXT = [
@@ -256,7 +249,7 @@ if (process.env.SHAPES_DEBUG) {
   for (const v of uniqueViolations) console.log(`\n=====\n(${v.rule}) ${v.snippet}`)
 }
 
-test('静的な走査: 検出したコマンドは、既知の例外（範囲 B〜D）か許可リストに理由付きで載っている', () => {
+test('静的な走査: 検出したコマンドは、既知の例外（範囲 C）か許可リストに理由付きで載っている', () => {
   const entries = [...KNOWN_EXCEPTIONS, ...ALLOWED_TEXT]
   const unexplained = uniqueViolations.filter((v) => !entries.some((e) => e.rules.includes(v.rule) && e.match.test(v.snippet)))
   assert.deepEqual(unexplained.map((v) => `(${v.rule}) ${v.snippet}`), [])
@@ -267,9 +260,9 @@ test('静的な走査: 既知の例外・許可リストの項目はすべて何
   assert.deepEqual(stale.map((e) => `${e.where}: ${e.match}`), [])
 })
 
-test('既知の例外は範囲 B〜D だけで、理由を持つ（範囲 A は例外にしない）', () => {
+test('既知の例外は範囲 C だけで、理由を持つ（直した範囲 A・B・D は例外にしない）', () => {
   for (const e of KNOWN_EXCEPTIONS) {
-    assert.ok(['B', 'C', 'D'].includes(e.range), `${e.where}: 範囲 ${e.range}`)
+    assert.ok(['C'].includes(e.range), `${e.where}: 範囲 ${e.range}`)
     assert.ok(e.reason && e.where, `${e.match}: 理由と箇所が要る`)
   }
   for (const e of ALLOWED_TEXT) assert.ok(e.reason && e.where, `${e.match}: 理由と箇所が要る`)
