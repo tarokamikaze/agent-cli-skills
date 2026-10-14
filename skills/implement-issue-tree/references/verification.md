@@ -140,8 +140,9 @@ grep -n "gh issue view" scripts/implement-issue-tree.js
 # （mergeExecutePrompt）がレビュー本文を読まないことを目視確認
 grep -n "gh pr merge\|gh issue close" scripts/implement-issue-tree.js
 
-# State プロンプトが固定フェンス・固定 HEREDOC デリミタを使っていないこと
-grep -n "PATCH_EOF\|boundaryNonce" scripts/implement-issue-tree.js
+# State プロンプトが固定フェンスを使わず（nonce 境界）、patch を HEREDOC ではなく Write ツールの
+# patch ファイル（<状態ファイル>.patch-<nonce>.json）と state-write.sh で渡していること
+grep -n "PATCH_EOF\|GROUPS_EOF\|boundaryNonce\|statePatchSteps" scripts/implement-issue-tree.js
 
 # worktree 削除の安全性（Issue #139 / #142 / #148）
 # 1. 使い捨て worktree（review / pr-create）が削除されず記録のみであること
@@ -155,7 +156,7 @@ grep -n "orphanDeleteCandidates" scripts/implement-issue-tree.js
 grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scripts/implement-issue-tree.js
 ```
 
-期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
+期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 3）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
 worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree は自動削除しない。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
