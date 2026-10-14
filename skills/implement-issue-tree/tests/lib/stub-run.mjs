@@ -95,7 +95,8 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (label.startsWith('impl:#')) return { branch: `feat/${n}-x`, summary: 's', worktreePath: `/repo/wt/${n}` }
     // セキュリティ専用の Review（args.securityReview）も既定は ok（通常の Review と同じスキーマ）
     if (label.startsWith('review:#') || label.startsWith('security-review:#')) return { state: 'ok', highestSeverity: 'none', summary: 's', worktreePath: `/repo/wt/r${n}` }
-    if (label.startsWith('fix:#')) return { pushed: false, summary: 'fixed', worktreePath: `/repo/wt/f${n}` }
+    // branchSynced は Review ループの fix の申告（fix のコミットをブランチに載せた）。Merge ループの fix は読まない。
+    if (label.startsWith('fix:#')) return { pushed: false, summary: 'fixed', worktreePath: `/repo/wt/f${n}`, branchSynced: true, fixHeadSha: 'c'.repeat(40) }
     if (label.startsWith('pr-create:#')) return { prNumber: 1000 + n, summary: 's', worktreePath: `/repo/wt/p${n}`, checksStarted: true, mergeableAfterPush: 'MERGEABLE' }
     if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: 'a'.repeat(40), headRefName: `feat/${n}-x`, baseRefName: 'main', isCrossRepository: false, closingIssues: [n] }
     if (label.startsWith('merge:#')) return { state: 'blocked', blockedReason: 'quality', summary: '監視中断', unresolvedComments: [] }
