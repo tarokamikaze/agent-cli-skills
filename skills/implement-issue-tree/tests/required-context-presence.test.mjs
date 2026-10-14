@@ -52,9 +52,11 @@ test('monitorPrompt(clientMergeActive): 手順 3g が手順 6 より前にあり
   const i6 = p.indexOf('\n6. ')
   assert.ok(i3g < i6, '3g は手順 6 より前')
   const s = p.slice(i3g, i6)
-  assert.ok(s.includes('rules/branches/'))
-  assert.ok(s.includes('check-runs') && s.includes('statuses'))
-  assert.ok(s.includes(REQUIRED_MISSING_JQ))
+  // required context と HEAD 上の context の取得・不足件数の jq は required-context-missing.sh が行う（Issue #11）。
+  // スクリプトの式が REQUIRED_MISSING_JQ と同じであることと、旧コマンドと同じ件数を出すことは ci-scripts.test.mjs が確かめる
+  assert.ok(s.includes('required-context-missing.sh main <HEAD sha>'))
+  assert.ok(s.includes('check-run 名') && s.includes('commit status'))
+  assert.ok(!s.includes(REQUIRED_MISSING_JQ), 'jq の式をプロンプトに載せない')
   assert.ok(s.includes('最大 10 分'))
   assert.ok(s.includes('gh pr view') && s.includes('CONFLICTING'))
   assert.ok(s.includes('state: timeout') && s.includes('checksTotal'))

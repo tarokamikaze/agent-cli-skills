@@ -80,7 +80,7 @@ test('prCreatePrompt: CI 起動確認が push 行より後に現れ、check-runs
   assert.ok(pushIdx >= 0, 'push 指示が見つからない')
   assert.ok(checkIdx >= 0, 'push 後 CI 起動確認の指示がない')
   assert.ok(pushIdx < checkIdx, 'CI 起動確認が push より前に現れる（push していない head を観測してしまう）')
-  assert.ok(prompt.includes("check-runs --jq '.total_count'"), 'check-run 総数の取得コマンドがない')
+  assert.ok(prompt.includes('checks-total.sh <headRefOid>'), 'チェック総数の取得コマンド（checks-total.sh）がない')
   assert.ok(prompt.includes('--json mergeable --jq .mergeable'), 'mergeable の取得コマンドがない')
   assert.ok(prompt.includes('30 秒間隔で最大 5 分'), '有界（30 秒間隔・最大 5 分）の待機指示がない')
   assert.ok(prompt.includes('checksStarted'), 'checksStarted の返却指示がない')
@@ -147,9 +147,12 @@ const COUNT_TARGETS = [
 test('チェック総数は check-run と commit status の合計で数える（PR #480）', () => {
   for (const [name, build] of COUNT_TARGETS) {
     const prompt = build()
-    assert.ok(prompt.includes("check-runs --jq '.total_count'"), `${name}: check-run 総数の取得指示がない`)
+    // 2 本の取得と合計は checks-total.sh が行う（Issue #11）。スクリプトが check-run と commit status を合算することは
+    // ci-scripts.test.mjs が旧コマンドとの比較で確かめる。ここではプロンプトが合算の定義を説明していることを固定する
+    assert.ok(prompt.includes('checks-total.sh'), `${name}: チェック総数の取得指示（checks-total.sh）がない`)
+    assert.ok(prompt.includes('check-run の total_count'), `${name}: check-run 総数を数える旨の説明がない`)
     assert.ok(
-      prompt.includes("/status --jq '.statuses | length'"),
+      prompt.includes('combined status の statuses の件数'),
       `${name}: commit status（combined status）件数の取得指示がない — check-run のみを数えると commit status だけの CI で 0 件と誤判定する`,
     )
     assert.ok(prompt.includes('合計'), `${name}: 両者を合算する指示がない`)
@@ -228,7 +231,7 @@ test('monitorPrompt: 手順 2 は --watch の前に check-run 総数を取得し
   const idx3 = prompt.indexOf('\n3. ', idx2)
   assert.ok(idx3 > idx2, '手順 3 の開始位置を特定できない')
   const section2 = prompt.slice(idx2, idx3)
-  const totalIdx = section2.indexOf("check-runs --jq '.total_count'")
+  const totalIdx = section2.indexOf('checks-total.sh')
   // 集計定義の説明文にも「gh pr checks」の語が出るため、--watch 実行コマンドで位置決めする。
   const watchIdx = section2.indexOf(`gh pr checks ${impl.prNumber} --watch`)
   assert.ok(totalIdx >= 0, '手順 2 に check-run 総数の取得指示がない')
