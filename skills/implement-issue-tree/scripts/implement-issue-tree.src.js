@@ -11,7 +11,7 @@ export const meta = {
     { title: 'Recover', detail: '中断作業の回復判断（継続/破棄）' },
     { title: 'Plan', detail: 'イシューごとの実装計画立案（セッション継承モデル・worktree なし）' },
     { title: 'Implement', detail: '計画に沿った実装・ローカルコミット（push・PR 作成なし）（worktree 並列）', model: 'sonnet' },
-    { title: 'Review', detail: 'ローカル diff の品質・セキュリティレビュー（OK→Merge / 指摘→修正ループ / 最終ラウンドは Low のみ許容しコメント化）', model: 'sonnet' },
+    { title: 'Review', detail: 'ローカル diff の品質・セキュリティレビュー（OK→Merge / 指摘→修正ループ / Low のみなら通過させ PR コメント化）', model: 'sonnet' },
     { title: 'Merge', detail: 'CI / 外部チェック（確定時のみ）監視・レビュー全解決確認・マージ可能状態化（opt-in ランに限り merge-exec の独立再検証 + G0 通過後に squash merge。既定は新規マージなし）・マージ済み PR のクローズ回復', model: 'sonnet' },
   ],
 }
@@ -409,6 +409,19 @@ function sanitize(str) {
 function capText(str, max = 2000) {
   const s = String(str ?? '')
   return s.length > max ? `${s.slice(0, max)}（省略）` : s
+}
+
+// Review の指摘を fix へ渡すときの上限。Review の summary は全指摘（重大度・箇所・直し方）を並べるため
+// monitor 由来の自由文と同じ 2000 文字で切ると、後半の指摘が fix に届かず直されない。
+// 実用上は切れない大きさにしつつ、肥大化の歯止めとして上限は残す。
+const REVIEW_FINDING_MAX = 30000
+
+// capText と同じ切り詰めだが、切った事実と省略した文字数を本文に明示する。fix が「指摘は全部届いた」と
+// 誤解して残りを見逃さないための注記で、Review の指摘の受け渡しだけに使う。
+function capFindingText(str, max) {
+  const s = String(str ?? '')
+  if (s.length <= max) return s
+  return `${s.slice(0, max)}\n（注意: Review の指摘が上限 ${max} 文字で切られた。以降 ${s.length - max} 文字の指摘は届いていない。直した後に再 Review で残りが挙がる前提で、届いた分を漏れなく直すこと）`
 }
 
 // 未信頼データ埋め込み用のデータ境界マーカートークン。固定文字列だと境界偽装できるため
@@ -2714,7 +2727,7 @@ const PR_CREATE_SCHEMA = {
   },
 }
 
-// 独立 Review フェーズのスキーマ。Low 含む指摘が 1 件でもあれば needs-fix、指摘なしなら ok。
+// 独立 Review フェーズのスキーマ。Low 含む指摘が 1 件でもあれば needs-fix、指摘なしなら ok（Low のみの needs-fix は呼び出し側が通過扱いにする）。
 // Review エージェントは判定のみ担う（修正は fix の責務）。worktreePath は required（Issue #404）。
 const REVIEW_SCHEMA = {
   type: 'object',
@@ -2726,7 +2739,7 @@ const REVIEW_SCHEMA = {
     highestSeverity: {
       type: 'string',
       enum: ['none', 'low', 'medium', 'high', 'critical'],
-      description: '全指摘のうち最も高い重要度。指摘なし（state=ok）は none。blocked の場合も none。最終 Review ラウンドで low/none なら通過扱いにするため必須。',
+      description: '全指摘のうち最も高い重要度。指摘なし（state=ok）は none。blocked の場合も none。low のみなら通過扱い（PR コメントへ回す）にするため必須。',
     },
     summary: { type: 'string', description: 'ok の場合は確認内容の要約。needs-fix の場合は全指摘を重要度付きで列挙。blocked の場合は解決できなかった理由' },
     // Review は読み取り専用（判定のみ）で worktree に成果物を残さないため、
@@ -4855,7 +4868,7 @@ function reviewPrompt(item, impl, security = false) {
     '   指摘がなければ state: ok とし、summary に確認した観点と問題なしの旨を記す。',
     '4. highestSeverity に全指摘のうち最も高い重要度を入れる（Critical→critical / High→high / Medium→medium / Low→low）。指摘なし（state=ok）は none。',
     '   重要: 重要度は厳密に判定すること。Low は「動作に影響しない様式・命名・重複・行数・コメント等の改善提案」に限る。',
-    '   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（最終ラウンドで Low のみは通過扱いになるため）。',
+    '   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（Low のみは通過扱いになるため）。',
     '5. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
     '返却: state（"ok" / "needs-fix" / "blocked"）/ highestSeverity / summary / worktreePath（pwd の結果。必須。欠落するとエージェントごと失敗扱いになるため、pwd を実行して絶対パスを必ず返す）。',
   ].join('\n')
@@ -5538,7 +5551,10 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
   const stripNonce = (s) => String(s ?? '').split(nonce).join('')
   // schema は信頼境界ではないため、ホスト側でも件数 20・text 300 文字・summary 2000 文字の
   // 同じ上限を二重適用する。
-  const summaryText = capText(stripNonce(sanitize(finding.summary)), 2000)
+  // Review の指摘は summaryMax で上限を上げて渡される（Issue #5）。それ以外の finding は従来どおり 2000 文字。
+  const summaryText = Number.isInteger(finding?.summaryMax) && finding.summaryMax > 2000
+    ? capFindingText(stripNonce(sanitize(finding.summary)), finding.summaryMax)
+    : capText(stripNonce(sanitize(finding.summary)), 2000)
   const unresolvedAll = Array.isArray(finding?.unresolvedComments) ? finding.unresolvedComments : []
   const unresolvedShown = unresolvedAll.slice(0, 20)
   const unresolvedThreadLines =
@@ -7532,7 +7548,7 @@ async function runImplement(item) {
     let reviewsLeft = 3
     // ループ外からも参照できるよう最後の Review 指摘をここで保持する
     let lastReviewSummary = '不明'
-    // 最終 Review ラウンドで Low のみだった場合に通過させ、その Low 指摘を PR 作成後に
+    // Review が Low のみだった場合に通過させ、その Low 指摘を PR 作成後に
     // コメントとして追加するため保持する（Medium 以上が残った場合は空のまま blocked になる）。
     let deferredLowFindings = ''
     while (!reviewPassed && reviewsLeft > 0) {
@@ -7583,17 +7599,21 @@ async function runImplement(item) {
       // needs-fix または r が無効（安全側に倒して fix 相当とみなす）
       lastReviewSummary = r?.summary ?? 'review エージェントが異常終了した'
       log(`#${item.number}: Review 指摘あり（残り ${reviewsLeft} 回）: ${sanitize(lastReviewSummary)}`)
-      // 最終反復では fix しても再レビューできない。Low のみは通過扱いにし PR 作成後にコメント
-      // として残す。Medium 以上が残る場合は fix せず収束失敗（blocked）として抜ける。
+      // Low のみ（動作に影響しない様式・命名等の改善提案）は何巡目でも通過扱いにし、Low 指摘は PR 作成後に
+      // コメントとして残す。Low を直すために巡を回すと、前の巡に無かった新しい観点の Low が毎回挙がり、
+      // Review・fix・セキュリティの Review が上限まで回る（Issue #6）。Critical / High / Medium は従来どおり
+      // fix して再 Review する。needs-fix + 'none' は矛盾出力のため、highestSeverity 不明と同じく
+      // medium 相当とみなして通さない。セキュリティの Review がある場合は combineReviews の
+      // highestSeverity（両方の高い方）に当たるため、どちらかが medium 以上なら通らない。
+      const finalSeverity = r?.highestSeverity ?? 'medium'
+      if (finalSeverity === 'low') {
+        reviewPassed = true
+        deferredLowFindings = lastReviewSummary
+        log(`#${item.number}: Review は Low のみ — 通過させ、Low 指摘は PR コメントへ追加する`)
+        break
+      }
+      // 最終反復では fix しても再レビューできない。Medium 以上が残る場合は fix せず収束失敗（blocked）として抜ける。
       if (reviewsLeft === 0) {
-        // needs-fix + 'none' は矛盾出力のため安全側でブロック（low のみ通過）。
-        // highestSeverity 不明も安全側で medium 相当とみなす。
-        const finalSeverity = r?.highestSeverity ?? 'medium'
-        if (finalSeverity === 'low') {
-          reviewPassed = true
-          deferredLowFindings = lastReviewSummary
-          log(`#${item.number}: 最終 Review は Low のみ — 通過させ、Low 指摘は PR コメントへ追加する`)
-        }
         break
       }
       if (fixCount >= 6) {
@@ -7607,7 +7627,7 @@ async function runImplement(item) {
       const oldWorktreePathReview = currentWorktreePath
       // ブランチを checkout している worktree の側で ff してよいのは、ホストが記録した実装 worktree と
       // 直前の fix worktree だけ（Issue #4。メイン worktree・別ランの worktree には触れさせない）。
-      const fReview = await agent(fixPrompt(item, impl, { summary: lastReviewSummary }, false, [], [impl.worktreePath, currentWorktreePath]), {
+      const fReview = await agent(fixPrompt(item, impl, { summary: lastReviewSummary, summaryMax: REVIEW_FINDING_MAX }, false, [], [impl.worktreePath, currentWorktreePath]), {
         label: `fix:#${item.number}`,
         phase: 'Implement',
         ...stageModelOpt('fix', 'sonnet'),

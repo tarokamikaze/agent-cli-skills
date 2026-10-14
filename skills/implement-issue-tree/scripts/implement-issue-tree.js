@@ -11,7 +11,7 @@ phases:[
 {title:'Recover',detail:'中断作業の回復判断（継続/破棄）'},
 {title:'Plan',detail:'イシューごとの実装計画立案（セッション継承モデル・worktree なし）'},
 {title:'Implement',detail:'計画に沿った実装・ローカルコミット（push・PR 作成なし）（worktree 並列）',model:'sonnet'},
-{title:'Review',detail:'ローカル diff の品質・セキュリティレビュー（OK→Merge / 指摘→修正ループ / 最終ラウンドは Low のみ許容しコメント化）',model:'sonnet'},
+{title:'Review',detail:'ローカル diff の品質・セキュリティレビュー（OK→Merge / 指摘→修正ループ / Low のみなら通過させ PR コメント化）',model:'sonnet'},
 {title:'Merge',detail:'CI / 外部チェック（確定時のみ）監視・レビュー全解決確認・マージ可能状態化（opt-in ランに限り merge-exec の独立再検証 + G0 通過後に squash merge。既定は新規マージなし）・マージ済み PR のクローズ回復',model:'sonnet'},
 ],
 }
@@ -409,6 +409,19 @@ return String(str)
 function capText(str,max=2000){
 const s=String(str??'')
 return s.length>max?`${s.slice(0, max)}（省略）`:s
+}
+
+
+
+
+const REVIEW_FINDING_MAX=30000
+
+
+
+function capFindingText(str,max){
+const s=String(str??'')
+if(s.length<=max)return s
+return`${s.slice(0, max)}\n（注意: Review の指摘が上限 ${max} 文字で切られた。以降 ${s.length - max} 文字の指摘は届いていない。直した後に再 Review で残りが挙がる前提で、届いた分を漏れなく直すこと）`
 }
 
 
@@ -2726,7 +2739,7 @@ state:{type:'string',enum:['ok','needs-fix','blocked']},
 highestSeverity:{
 type:'string',
 enum:['none','low','medium','high','critical'],
-description:'全指摘のうち最も高い重要度。指摘なし（state=ok）は none。blocked の場合も none。最終 Review ラウンドで low/none なら通過扱いにするため必須。',
+description:'全指摘のうち最も高い重要度。指摘なし（state=ok）は none。blocked の場合も none。low のみなら通過扱い（PR コメントへ回す）にするため必須。',
 },
 summary:{type:'string',description:'ok の場合は確認内容の要約。needs-fix の場合は全指摘を重要度付きで列挙。blocked の場合は解決できなかった理由'},
 
@@ -4855,7 +4868,7 @@ security
 '   指摘がなければ state: ok とし、summary に確認した観点と問題なしの旨を記す。',
 '4. highestSeverity に全指摘のうち最も高い重要度を入れる（Critical→critical / High→high / Medium→medium / Low→low）。指摘なし（state=ok）は none。',
 '   重要: 重要度は厳密に判定すること。Low は「動作に影響しない様式・命名・重複・行数・コメント等の改善提案」に限る。',
-'   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（最終ラウンドで Low のみは通過扱いになるため）。',
+'   実バグ・誤った挙動・セキュリティ・認可・データ不整合・エッジケースの欠落は最低でも medium とする（Low のみは通過扱いになるため）。',
 '5. pwd の結果を worktreePath として返す（呼び出し元がラン終了時の残骸一覧に記録するため。自動削除はされない）。',
 '返却: state（"ok" / "needs-fix" / "blocked"）/ highestSeverity / summary / worktreePath（pwd の結果。必須。欠落するとエージェントごと失敗扱いになるため、pwd を実行して絶対パスを必ず返す）。',
 ].join('\n')
@@ -5538,7 +5551,10 @@ const nonce=boundaryNonce(`fix:${item?.number ?? 0}:${JSON.stringify(finding ?? 
 const stripNonce=(s)=>String(s??'').split(nonce).join('')
 
 
-const summaryText=capText(stripNonce(sanitize(finding.summary)),2000)
+
+const summaryText=Number.isInteger(finding?.summaryMax)&&finding.summaryMax>2000
+?capFindingText(stripNonce(sanitize(finding.summary)),finding.summaryMax)
+:capText(stripNonce(sanitize(finding.summary)),2000)
 const unresolvedAll=Array.isArray(finding?.unresolvedComments)?finding.unresolvedComments:[]
 const unresolvedShown=unresolvedAll.slice(0,20)
 const unresolvedThreadLines=
@@ -7585,15 +7601,19 @@ lastReviewSummary=r?.summary??'review エージェントが異常終了した'
 log(`#${item.number}: Review 指摘あり（残り ${reviewsLeft} 回）: ${sanitize(lastReviewSummary)}`)
 
 
-if(reviewsLeft===0){
+
+
 
 
 const finalSeverity=r?.highestSeverity??'medium'
 if(finalSeverity==='low'){
 reviewPassed=true
 deferredLowFindings=lastReviewSummary
-log(`#${item.number}: 最終 Review は Low のみ — 通過させ、Low 指摘は PR コメントへ追加する`)
+log(`#${item.number}: Review は Low のみ — 通過させ、Low 指摘は PR コメントへ追加する`)
+break
 }
+
+if(reviewsLeft===0){
 break
 }
 if(fixCount>=6){
@@ -7607,7 +7627,7 @@ return false
 const oldWorktreePathReview=currentWorktreePath
 
 
-const fReview=await agent(fixPrompt(item,impl,{summary:lastReviewSummary},false,[],[impl.worktreePath,currentWorktreePath]),{
+const fReview=await agent(fixPrompt(item,impl,{summary:lastReviewSummary,summaryMax:REVIEW_FINDING_MAX},false,[],[impl.worktreePath,currentWorktreePath]),{
 label:`fix:#${item.number}`,
 phase:'Implement',
 ...stageModelOpt('fix','sonnet'),
