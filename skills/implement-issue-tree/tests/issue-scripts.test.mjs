@@ -1,6 +1,6 @@
 // GitHub を読む同梱スクリプト（scripts/fetch-tree.sh・probe-prereqs.sh・probe-declared-deps.sh・fetch-root-ancestors.sh・
 // detect-external-checks.sh）を、偽の gh（fixture の JSON に本物の jq で --jq を適用する）に対して実行する回帰テスト
-// （y-backend#300 の追跡: agent のプロンプトにシェルを組み立てさせず、同梱スクリプトを 1 コマンドで呼ばせる）。
+// （利用側のリポジトリで観測した権限確認によるランの停止への対応: agent のプロンプトにシェルを組み立てさせず、同梱スクリプトを 1 コマンドで呼ばせる）。
 //
 // 検証する契約（ホストの照合は変えていないので、スクリプトは旧プロンプトの手順と同じ出力をする）:
 //   - fetch-tree.sh: ルートと全子孫を NODE 行で出す。closed のノードも辿り、total が 0 のノードでは sub_issues を呼ばない。
