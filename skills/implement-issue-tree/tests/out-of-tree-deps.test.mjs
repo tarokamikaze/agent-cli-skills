@@ -37,7 +37,6 @@ const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-out-of-tree-')
 const slicePath = join(sliceDir, 'implement-issue-tree-out-of-tree-defs.mjs')
 const SLICE_EXPORTS = [
   'OUT_OF_TREE_DEPS_MAX',
-  'OUT_OF_TREE_STATE_SIG_JQ',
   'outOfTreeStateChecksum',
   'ROOT_ANCESTOR_DEPTH',
   'ROOT_ANCESTOR_TRUNCATED',
@@ -57,7 +56,6 @@ const SLICE_EXPORTS = [
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 const {
   OUT_OF_TREE_DEPS_MAX,
-  OUT_OF_TREE_STATE_SIG_JQ,
   outOfTreeStateChecksum,
   ROOT_ANCESTOR_DEPTH,
   ROOT_ANCESTOR_TRUNCATED,
@@ -74,6 +72,13 @@ const {
   formatIssueList,
   MERGE_CONTEXT_COMMON,
 } = await import(pathToFileURL(slicePath).href)
+
+// jq の式・GraphQL のクエリは同梱スクリプトにある（Issue #300 の追跡）。テストは同じファイルから値を取り出して検証する。
+const SCRIPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
+const libVar = (name) => execFileSync('bash', ['-c', `. "$1" && printf '%s' "$${name}"`, '_', join(SCRIPTS_DIR, 'lib', 'issue-jq.sh')]).toString()
+const OUT_OF_TREE_STATE_SIG_JQ = libVar('OUT_OF_TREE_STATE_SIG_JQ')
+const PROBE_PREREQS = readFileSync(join(SCRIPTS_DIR, 'probe-prereqs.sh'), 'utf8')
+const ROOT_ANCESTORS = readFileSync(join(SCRIPTS_DIR, 'fetch-root-ancestors.sh'), 'utf8')
 
 // ---------------------------------------------------------------------------
 // 純粋関数
@@ -253,10 +258,13 @@ test('classifyOutOfTreeDeps: 祖先チェーン取得失敗（null）では祖�
 
 test('outOfTreeStatePrompt: state のみを取得する固定コマンドで、本文・書き込み系を含まない', () => {
   const p = outOfTreeStatePrompt([5, 12])
-  assert.ok(p.includes('for n in 5 12; do'))
-  const q = `{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}`
-  // issue として取れない番号（PR 番号）は gh pr view へフォールバックし、MERGED を取得できる。
-  assert.ok(p.includes(`out=$(gh issue view "$n" --json number,state --jq '${q}' 2>/dev/null || gh pr view "$n" --json number,state --jq '${q}')`))
+  const cmd = p.split('\n').find((l) => l.includes('probe-prereqs.sh'))
+  assert.match(cmd, /^bash '[^']*\/scripts\/run-verified\.sh' \S+ probe-prereqs\.sh 5 12$/)
+  assert.doesNotMatch(cmd, /[{}"]|\$\(|;|&&|\|/, '{}・引用符・$(...)・連結をコマンド行に含めない')
+  // issue として取れない番号（PR 番号）は gh pr view へフォールバックし、MERGED を取得できる（スクリプトが行う）。
+  assert.ok(PROBE_PREREQS.includes('q="{number: .number, state: .state} | ${OUT_OF_TREE_STATE_SIG_JQ}"'))
+  assert.ok(PROBE_PREREQS.includes('out=$(gh issue view "${n}" --json number,state --jq "${q}" 2>/dev/null || gh pr view "${n}" --json number,state --jq "${q}")'))
+  assert.doesNotMatch(PROBE_PREREQS, /--json [^\n]*body|gh issue close|gh pr merge|--method/)
   assert.ok(p.includes(MERGE_CONTEXT_COMMON))
   assert.doesNotMatch(p, /--json [^\n]*body|gh issue close|gh pr merge|--method/)
   assert.throws(() => outOfTreeStatePrompt([5, '6; rm -rf /']), /正の整数/)
@@ -264,22 +272,21 @@ test('outOfTreeStatePrompt: state のみを取得する固定コマンドで、�
 
 test('rootAncestorsPrompt: parent を ROOT_ANCESTOR_DEPTH 段辿る読み取り専用 GraphQL クエリを含み、has("parent") で打ち切りを区別する', () => {
   const p = rootAncestorsPrompt(4)
-  assert.equal((p.match(/parent\{/g) ?? []).length, ROOT_ANCESTOR_DEPTH)
-  assert.ok(p.includes('-F n=4 '))
-  assert.ok(p.includes('recurse(.parent // empty) | {number: .number, parent: (if has("parent") then (.parent.number // 0) else -1 end)}'))
+  // 段数はホストの ROOT_ANCESTOR_DEPTH を引数で渡し、クエリの組み立てはスクリプトが行う
+  const cmd = p.split('\n').find((l) => l.includes('fetch-root-ancestors.sh'))
+  assert.match(cmd, new RegExp(`^bash '[^']*/scripts/run-verified\\.sh' \\S+ fetch-root-ancestors\\.sh 4 ${ROOT_ANCESTOR_DEPTH}$`))
+  assert.doesNotMatch(cmd, /[{}"]|\$\(|;|&&|\|/)
+  assert.ok(ROOT_ANCESTORS.includes('sel="number parent{${sel}}"'))
+  assert.ok(ROOT_ANCESTORS.includes('recurse(.parent // empty) | {number: .number, parent: (if has("parent") then (.parent.number // 0) else -1 end)}'))
   assert.ok(p.includes('-1'), '打ち切りマーカー -1 の意味を説明文に含む')
-  // 実行コマンド行は読み取り専用の query のみ（共通指示の禁止事項の説明文は対象外）。
-  const cmd = p.split('\n').find((l) => l.startsWith('gh api graphql '))
-  assert.ok(cmd)
-  assert.doesNotMatch(cmd, /mutation/)
+  // スクリプトのクエリは読み取り専用の query のみ
+  assert.doesNotMatch(ROOT_ANCESTORS, /mutation/)
   assert.throws(() => rootAncestorsPrompt(0), /正の整数/)
 })
 
 test('rootAncestorsPrompt jq 実行: 深さ以内の null（真の終端）と深さが尽きたキー不在（打ち切り）を -1 で区別する', () => {
-  const p = rootAncestorsPrompt(4)
-  const cmd = p.split('\n').find((l) => l.startsWith('gh api graphql '))
-  const m = cmd.match(/--jq '(.+)'$/)
-  assert.ok(m, 'gh api graphql コマンド行から --jq 式を抽出できる')
+  const m = ROOT_ANCESTORS.match(/--jq '(.+)'$/m)
+  assert.ok(m, 'fetch-root-ancestors.sh から --jq 式を抽出できる')
   const jqExpr = m[1]
   // 真の終端: GraphQL がフィールドを返すが値が null（.parent キーは存在する）。
   const terminal = JSON.parse(execFileSync('jq', ['-c', jqExpr], {
