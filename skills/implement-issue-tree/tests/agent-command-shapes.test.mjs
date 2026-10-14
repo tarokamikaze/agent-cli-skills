@@ -82,6 +82,9 @@ async function collect() {
     await call(() => d.loadState())
     await call(() => d.updateStateDetailed(5, { status: 'merged', note: 'x' }))
     await call(() => d.updateStateDetailed(5, { status: 'merged' }, { cleanupWorktree: '/repo/wt/5', cleanupBranch: 'feat/5-x' }))
+    // Recover の破棄（worktree とブランチの削除）。preserveWorktreeField の有無で手順 2 の文面が変わる
+    await call(() => d.updateStateDetailed(5, { status: 'pending', branch: 'feat/5-x' }, { cleanupWorktree: '/repo/wt 5', deleteBranch: true }))
+    await call(() => d.updateStateDetailed(5, { status: 'pending', branch: 'feat/5-x' }, { cleanupWorktree: '/repo/wt/r5', preserveWorktreeField: true }))
     await call(() => d.persistPerWorktreeByteReserveHighWater(1024))
     await call(() => d.setPerWorktreeByteReserveHighWater(1024))
     await call(() => d.scanOrphanWorktrees())
@@ -94,6 +97,7 @@ async function collect() {
     await call(() => d.initAllPending([{ number: 5, kind: 'implement' }, { number: 6, kind: 'verify-close' }]))
     await call(() => d.writeBlockedStateChunk([{ number: 5, patch: { status: 'blocked' } }], 'state:update-batch:1'))
     await call(() => d.verifyDiscardSafety(5, '/repo/wt/5', 'feat/5-x'))
+    await call(() => d.verifyDiscardSafety(5, '', ''))
     await call(() => d.declaredDepsPrompt([5, 6]))
     await call(() => d.outOfTreeStatePrompt([7]))
     await call(() => d.rootAncestorsPrompt(5))
@@ -174,10 +178,34 @@ test('範囲 B（merge-exec の G0 とマージの実行）を g0-check.sh と�
   }
 })
 
+test('範囲 D で同梱スクリプト・単独のコマンドへ移した箇所が、マトリクスで実際に組み立てられている', () => {
+  const all = collected.recorded.join('\n')
+  for (const part of [
+    " worktree-cleanup.sh remove '/repo/wt/5'", // state:cleanup（パスは単一引用符で包む）
+    " worktree-cleanup.sh remove '/repo/wt 5'", // 半角スペースを含むパス
+    ' worktree-cleanup.sh delete-branch feat/5-x', // Recover の破棄のブランチ削除
+    ' worktree-cleanup.sh sweep _/issue-trees/', // ラン末尾のスイープ（候補一覧は Write ツールのファイル）
+    " discard-safety.sh '/repo/wt/5' feat/5-x main", // 破棄前の観測
+    ' discard-safety.sh - - main', // パス・ブランチが無いときは -
+    ' fetch-tree.sh 5', // closePrompt の子孫の再帰取得
+  ]) {
+    assert.ok(all.includes(part), `${part.trim()} を起動するコマンドが組み立てられていない`)
+  }
+  for (const c of [
+    'git -C "/repo/wt/5" add -A',
+    'git -C "/repo/wt/5" commit -m "wip(recover): 中断時の未コミット変更を退避"',
+    'gh issue comment 5 --body-file <そのファイルの絶対パス>',
+    'gh issue close 5',
+  ]) {
+    assert.ok(collected.recorded.includes(c), `単独のコマンドにした ${c}`)
+  }
+})
+
 // --- 静的な走査 ---
 
-// まだ直していない範囲（Issue #11 の範囲 C・D。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に
-// 移して一覧から消した）。直した PR で項目を消し、最後の PR で一覧を空にする。
+// まだ直していない範囲（Issue #11 の範囲 C。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に、
+// 範囲 D〔削除と終了時の処理〕は worktree-cleanup.sh・discard-safety.sh に移して一覧から消した）。直した PR で項目を消し、
+// 最後の PR で一覧を空にする。
 // match は検出した断片（extractCommandCandidates の 1 行の切り出し、または extractCommandBlocks の複数行の塊）に当てる正規表現
 const KNOWN_EXCEPTIONS = [
   {
@@ -200,27 +228,6 @@ const KNOWN_EXCEPTIONS = [
     rules: ['c'],
     match: /^pass=\$\(grep -cxF -- "PLACEHOLDER" "\$g"\); rc=\$\?\nfail=/,
     reason: 'opt-in 記録のゲート（PR 本文の読み取りと正規化）。書き込み側と同じ範囲 C の PR で移す',
-  },
-  {
-    range: 'D',
-    where: 'updateStateDetailed の worktree の削除（state:cleanup）・sweepClosedWorktrees の削除前の確認',
-    rules: ['a'],
-    match: /^(?:target=\$\(cd "\$p"|main_wt_real=\$\(cd "\$main_wt") 2>\/dev\/null && pwd -P\)$/,
-    reason: 'rm -rf の前の実パスの安全確認。削除の安全判定ごとスクリプトへ移す（範囲 D の PR。script-trust-model.md の方針）',
-  },
-  {
-    range: 'D',
-    where: 'sweepClosedWorktrees（ラン終了時の worktree のスイープ）',
-    rules: ['a', 'c'],
-    match: /^(?:CANDIDATES_EOF\njq -r '\.\[\]' "\$candidates_file" \| while IFS= read -r p; do\n|esac\nrm -rf -- "\$p"\n)/,
-    reason: '削除を含む複数行の手順。削除の安全判定ごとスクリプトへ移す（範囲 D の PR）',
-  },
-  {
-    range: 'D',
-    where: 'verifyDiscardSafety（worktree 破棄前の安全確認）の手順 3',
-    rules: ['c'],
-    match: /^b="[^"]+"\nbase="[^"]+"\ngit rev-list --count "origin\/\$base"\.\."refs\/heads\/\$b"$/,
-    reason: '破棄（削除）の安全判定の観測。範囲 D の PR で削除の判定と一緒にスクリプトへ移す',
   },
 ]
 
@@ -246,7 +253,7 @@ if (process.env.SHAPES_DEBUG) {
   for (const v of uniqueViolations) console.log(`\n=====\n(${v.rule}) ${v.snippet}`)
 }
 
-test('静的な走査: 検出したコマンドは、既知の例外（範囲 C・D）か許可リストに理由付きで載っている', () => {
+test('静的な走査: 検出したコマンドは、既知の例外（範囲 C）か許可リストに理由付きで載っている', () => {
   const entries = [...KNOWN_EXCEPTIONS, ...ALLOWED_TEXT]
   const unexplained = uniqueViolations.filter((v) => !entries.some((e) => e.rules.includes(v.rule) && e.match.test(v.snippet)))
   assert.deepEqual(unexplained.map((v) => `(${v.rule}) ${v.snippet}`), [])
@@ -257,9 +264,9 @@ test('静的な走査: 既知の例外・許可リストの項目はすべて何
   assert.deepEqual(stale.map((e) => `${e.where}: ${e.match}`), [])
 })
 
-test('既知の例外は範囲 C・D だけで、理由を持つ（直した範囲 A・B は例外にしない）', () => {
+test('既知の例外は範囲 C だけで、理由を持つ（直した範囲 A・B・D は例外にしない）', () => {
   for (const e of KNOWN_EXCEPTIONS) {
-    assert.ok(['C', 'D'].includes(e.range), `${e.where}: 範囲 ${e.range}`)
+    assert.ok(['C'].includes(e.range), `${e.where}: 範囲 ${e.range}`)
     assert.ok(e.reason && e.where, `${e.match}: 理由と箇所が要る`)
   }
   for (const e of ALLOWED_TEXT) assert.ok(e.reason && e.where, `${e.match}: 理由と箇所が要る`)

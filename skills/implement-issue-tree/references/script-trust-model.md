@@ -123,9 +123,36 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - `external-check-runs.sh`・`review-state-counts.sh`・`checks-state-counts.sh` は、旧コマンドがページごとに出していた JSON の配列（`[{"v":..., "count":...}]`）ではなく、全ページを合算した `<値> <件数>` の行を出す。どの値も agent が読むだけで、ホストの照合・スキーマには渡らない
 - `unresolved-threads.sh` の一覧は、旧手順の GraphQL の生の応答ではなく、未解決スレッドだけの行（`threadId`・`path`・`url`・`author`・`body`）を出す。`body` は `<untrusted-data source="review-comment">` で囲む（ホストの `untrusted()` と同じく、本文中の境界タグに似た文字列は `(untrusted-data)` に置き換える）。agent が返す `unresolvedComments` の形は変えていない
 
-回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする（範囲 B は次の第 4 弾で消した）。
+回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする（範囲 D は第 4 弾、範囲 B は第 5 弾で消した）。
 
-## 第 4 弾: マージ実行の G0 とマージのコマンド（Issue #11 の範囲 B）
+## 第 4 弾: worktree・ブランチの削除と終了時の処理（Issue #11 の範囲 D）
+
+第 3 弾と同じ 4 つの形に当たっていた削除まわりの手順を、削除の安全判定ごと同梱スクリプトへ移した。判定の結果と順序は旧プロンプトの手順と変えていない。単独のコマンドで済むもの（Recover の WIP の退避、クローズ検証のコメントとクローズ）は、スクリプトにせず「1 回の Bash 呼び出しで 1 本ずつ」と書いた文面にした。
+
+| スクリプト・コマンド | 置き換えた手順 | 出力 |
+|------------|----------------|------|
+| `worktree-cleanup.sh remove '<パス>'` | `state:cleanup` の worktree の削除（`git worktree list --porcelain` での登録の確認・`remove --force`・`unlock` して再試行・`$(cd "$p" && pwd -P)` で実パスを確かめてからの `rm -rf`・`git worktree prune`） | `REMOVED` / `ABSENT`（登録されていない・もう無い）で終了コード 0。`REFUSED`（メイン worktree かその配下）/ `FAILED` で 1 |
+| `worktree-cleanup.sh delete-branch <ブランチ>` | Recover の破棄のブランチ削除（`git branch --list` と `b=...; git branch -D -- "$b"`） | `DELETED` / `ABSENT` で 0、`FAILED` で 1 |
+| `worktree-cleanup.sh sweep <状態ファイル> <nonce> <sha256>` | ラン末尾のスイープ（`retain_file=$(mktemp)` と jq、`git worktree list --porcelain \| awk \| tail -n +2`、候補のヒアドキュメント、`while read` のループ、実パスの確認、`rm -rf`、`git worktree prune`） | 候補ごとに `REMOVED <パス>` か `SKIPPED <理由> <パス>`、保持対象ごとに `RETAINED <パス>`、最後に `DONE <件数>`。照合の失敗・状態ファイルを読めない・worktree の一覧を取れないときは何も消さず 1 |
+| `discard-safety.sh <パス\|-> <ブランチ\|-> <ベース>` | `verifyDiscardSafety` の観測（`p=...`・`git -C "$p" status --porcelain`・`b=...`・`base=...`・`git rev-list --count`） | `WORKTREE_MISSING`・`DIRTY`・`AHEAD` の 3 行（値の決め方は旧手順と同じ） |
+| `fetch-tree.sh <番号>`（第 2 弾のものを流用） | `closePrompt` の `gh api --paginate .../sub_issues` の再帰 | 第 2 弾と同じ。クローズ検証の agent は自分以外の `NODE` 行の state がすべて closed かを見る。終了コードが 0 以外・`DONE` 行が無いときは確認できないので閉じない |
+
+信頼の水準と、削除を含むスクリプトを入れる条件（上の「測定値の使い方」）について:
+
+- 削除の安全判定（登録済みの worktree か・メイン worktree とその配下でないか・状態ファイルの保持対象でないか）は、スクリプトが削除の直前に git と状態ファイルから自分で取り直して行い、agent が転記した値を使わない（「測定値の使い方」の (c)）。旧手順では agent が同じ判定をその場で組み立てたシェルで行っていたので、判定を agent の書き方に依存させない分だけ強くなる
+- スクリプトに渡すのは、ホストが `sanitizeWorktreePath`・`isValidBranchName` で検証したパスとブランチ名だけで、スクリプトも同じ規則で検査し直す（不正は exit 2 で何も消さない）。パスは半角スペースを許すため単一引用符で包む（引用符・展開の文字は検証で除外済み）
+- スイープの候補一覧は、agent が Write ツールで `<状態ファイル>.sweep-<nonce>.json` に書き、スクリプトが `SHA-256(nonce + 改行 + sweep + 改行 + 内容)`（ホストの `statePatchSha256(nonce, 'sweep', 一覧)`）を照合してから使う。写し間違い・別の呼び出しの一覧の流用は、何かを消す前に止まる。候補ファイルは成否・引数の誤りに関わらず消す
+- 迷ったら消さない: `git rev-parse --show-toplevel` が失敗したら `rm -rf` しない、`git worktree list` を取れなければ何も消さない、`discard-safety.sh` は `git worktree list` が失敗したら `DIRTY true`（ホストは削除しない）
+- agent が転記する値（`REMOVED` の行・`dirty`）の扱いは旧手順と同じ。`dirty` は Recover の `wipCommitted` の申告とあわせた 2 層の削除ゲートの片方で、旧手順でも agent の観測の転記だった。スクリプトにしたことで、観測のコマンドを agent が書き間違える余地が無くなる
+- 独立した検証として、`tests/cleanup-scripts.test.mjs` が実際の git で一時リポジトリと worktree を作り、旧プロンプトのシェル（テスト内に固定文字列で持つ）とスクリプトを同じ構成のリポジトリに流して、残ったファイル・`git worktree list`・ブランチが一致することを確かめる。対象は通常・locked・`.git` が壊れて `rm -rf` へ進むもの・未登録・実体の無い登録・メイン worktree の配下・実パスがメイン worktree になるシンボリックリンク・未コミットの変更・半角スペースを含むパス・状態ファイルの保持対象（failed / blocked / monitoring）。ホストが組み立てたコマンド（引用・照合値）をそのままスクリプトが受け付けることも同じテストで流して確かめる
+
+旧手順と違う点（どれも「消さない」側。消す場合の判定は変えていない）:
+
+- `state:cleanup` で、対象がメイン worktree 自身だったとき・`rm -rf` の前の確認でメイン worktree かその配下と分かったとき・`rm -rf` が失敗したときは、終了コード 1 を返し、agent は `ok: false` を返す。旧手順は「警告を残して中断する」「警告を残して継続する（非致命）」と書くだけで、`ok` の値を決めていなかった。ホストは `ok: false` を「削除未完」として扱い、削除できたことの記録（バイト軸の実測し直しの対象）に入れない
+- `state:cleanup` のメイン worktree のパスは、旧手順の `awk '{print $2; exit}'`（空白で切れる）ではなく、スイープと同じ `worktree ` の接頭辞の除去で読む。メイン worktree のパスに空白があっても実パスの比較が働く
+- スイープの出力に `SKIPPED <理由> <パス>` の行を足した（agent が読むだけで、ホストには渡らない）
+
+## 第 5 弾: マージ実行の G0 とマージのコマンド（Issue #11 の範囲 B）
 
 merge-exec の手順 2b（G0 ゲート: ベースブランチのサーバー側強制の実測）は、`gh api ... | jq` の多段・`{}` と `|` を含む `--jq`・`HEAD_SHA` / `REQ` / `RSC` / `APP_ID_<SLUG>` の代入を「1 回の Bash 実行でまとめて」流させていた。手順 5 のマージも `HEAD_SHA="<sha>"; gh pr merge ... --match-head-commit "$HEAD_SHA"` だった。どちらも上の (c)・(d) に当たる。
 

@@ -292,10 +292,13 @@ test('State/worktree 系の主要プロンプト（loadState・updateState merge
   }
 })
 
-test('worktree:sweep はプロンプトに「1 回の Bash 呼び出しで実行する」旨を含む（retain_file/registered_file/candidates_file を mktemp で手順をまたいで参照するため）', () => {
+test('worktree:sweep は mktemp で手順をまたぐシェルを組み立てさせず、同梱スクリプトを 1 コマンドで起動させる（候補一覧は Write ツールのファイル）', () => {
   const idx = source.indexOf("'worktree スイープタスク（ラン終了時の残骸回収）。'")
-  const section = source.slice(idx, idx + 700)
-  assert.match(section, /1 回の Bash 呼び出しで一連の手順すべてを実行する/)
+  const section = source.slice(idx, idx + 2600)
+  assert.match(section, /STATE_SCRIPT_ONLY/)
+  assert.match(section, /scriptCommand\('worktree-cleanup\.sh', ` sweep \$\{STATE_FILE\} \$\{nonce\} /)
+  assert.match(section, /Write ツールで、カレントディレクトリ（メイン worktree）の \$\{STATE_FILE\}\.sweep-\$\{nonce\}\.json/)
+  assert.doesNotMatch(section, /retain_file=\$\(mktemp\)|candidates_file|registered_file/)
 })
 
 // --- (g) scanMainWorktreeUntracked のプロンプトが破壊的操作を含まず例外時に throw しない ---
