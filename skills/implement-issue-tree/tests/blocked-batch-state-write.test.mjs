@@ -198,7 +198,8 @@ test('writeBlockedStateBatch: プロンプトは未信頼範囲の境界・TEMP_
   const json = p.split('\n').find((l) => l.startsWith('[{"numbers"'))
   // コマンドは 1 行で、patch の SHA-256（ホストが渡した JSON 1 行の値）と nonce を引数に持つ
   const cmd = p.split('\n').find((l) => l.includes('state-write.sh merge-groups'))
-  assert.ok(cmd.endsWith(`state-write.sh merge-groups _/issue-trees/1.json ${nonce} ${sha256Hex(json)}`), cmd)
+  // 照合値は nonce と束縛先（groups）を含む（state-write.sh と同じ定義）
+  assert.ok(cmd.endsWith(`state-write.sh merge-groups _/issue-trees/1.json ${nonce} ${sha256Hex(`${nonce}\ngroups\n${json}`)}`), cmd)
   assert.ok(p.includes(`Write ツールで、カレントディレクトリ（メイン worktree）の _/issue-trees/1.json.patch-${nonce}.json に`))
   // HEREDOC・mktemp・jq をエージェントに組み立てさせない
   assert.doesNotMatch(p, /<<'|\$\(mktemp|jq --slurpfile/)

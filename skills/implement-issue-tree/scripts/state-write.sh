@@ -3,8 +3,8 @@
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる）:
 #   bash state-write.sh create          <状態ファイル> <parent> <baseBranch> <parallel> <高水位の版>
-#   bash state-write.sh merge-item      <状態ファイル> <issue> <nonce> <patch の sha256>
-#   bash state-write.sh merge-groups    <状態ファイル> <nonce> <groups の sha256>
+#   bash state-write.sh merge-item      <状態ファイル> <issue> <nonce> <束縛した patch の sha256>
+#   bash state-write.sh merge-groups    <状態ファイル> <nonce> <束縛した groups の sha256>
 #   bash state-write.sh clear-worktree  <状態ファイル> <issue>
 #   bash state-write.sh init-pending    <状態ファイル> <issue>:<implement|verify-close>...
 #   bash state-write.sh high-water-max  <状態ファイル> <バイト数> <版>
@@ -16,12 +16,15 @@
 # sf_jq_write）。
 #
 # 未信頼データを含む patch（merge-item・merge-groups）はコマンド行に載せない。エージェントが Write ツールで
-# <状態ファイル>.patch-<nonce>.json へ 1 行の JSON を書き、このスクリプトがそれを読む。ホストは自分が渡した JSON の
-# SHA-256 を引数で渡し、ファイルの内容（末尾の改行を除く）がそれと一致するときだけ書き込む（転記の誤り・別の呼び出しの
-# patch の流用を書き込む前に止める）。patch ファイルは成否に関わらず消す。
+# <状態ファイル>.patch-<nonce>.json へ 1 行の JSON を書き、このスクリプトがそれを読む。ホストは
+# SHA-256(nonce + 改行 + 束縛先 + 改行 + JSON) を引数で渡し（束縛先は merge-item なら issue 番号、merge-groups なら
+# groups）、ファイルの内容（末尾の改行を除く）から同じ式で計算した値と一致するときだけ書き込む（転記の誤り・別の呼び出し・
+# 別の issue 向けの patch の流用を書き込む前に止める）。照合と読み込みは自分の一時ファイルへ写したものに対して行う。
+# patch ファイルは成否・引数の誤りに関わらず消す（nonce の形式を確かめたあと）。
 #
 # サブコマンドの意味:
-#   create          ファイルが無いときだけ親ディレクトリを作り、初期 JSON（items は空）を書く。既にあれば失敗
+#   create          ファイルが無いときだけ親ディレクトリを作り、初期 JSON（items は空）を書く。既にあれば失敗。
+#                   置き先の作成は ln で行い、同時に初期化しても既存のファイルを上書きしない
 #   merge-item      .items["<issue>"] = ((.items["<issue>"] // {}) + patch)
 #   merge-groups    patch は [{numbers: [...], patch: {...}}, ...]。各グループの patch を numbers の全番号へマージする
 #   clear-worktree  .items["<issue>"].worktree を "" にする（項目が無ければ作る）
@@ -67,24 +70,39 @@ f=$2
 shift 2
 sf_valid_state_path "${f}" || usage
 
-# patch ファイル（<状態ファイル>.patch-<nonce>.json）の内容の SHA-256 を期待値と照合する。一致すれば patch_file に
-# パスを入れて 0。不一致・欠落はファイルを消して FAILED で終了する。$1 = nonce、$2 = 期待する sha256。
-# 一致したファイルは呼び出し側が jq --slurpfile で読んでから消す（旧プロンプトと同じく --slurpfile で読む。
-# コマンド行の長さの上限に patch の大きさを依存させない）。
+# patch を扱うサブコマンド（merge-item・merge-groups）の後始末。nonce の形式を確かめたあとで
+# <状態ファイル>.patch-<nonce>.json と自分の写しを EXIT の trap に登録し、成否・引数の誤り（exit 2）に関わらず消す。
+# 消すのは検証済みの状態ファイルのパスと nonce から組み立てたこの形のファイルだけ。
+patch_src=''
 patch_file=''
+cleanup_patch() {
+  [ -n "${patch_src}" ] && rm -f -- "${patch_src}"
+  [ -n "${patch_file}" ] && rm -f -- "${patch_file}"
+  return 0
+}
+arm_patch_cleanup() {
+  sf_valid_nonce "$1" || usage
+  patch_src="${f}.patch-$1.json"
+  trap cleanup_patch EXIT
+}
+
+# patch ファイルを自分の一時ファイルへ写し、その写しの SHA-256 を期待値と照合する。照合と読み込みは同じ写しに対して
+# 行う（照合のあとで元ファイルが差し替えられても、照合していない内容を読まない）。一致すれば patch_file に写しの
+# パスを入れて 0。不一致・欠落は FAILED で終了する（元ファイルと写しは trap が消す）。
+# ハッシュの入力は「nonce + 改行 + 束縛先 + 改行 + patch（末尾の改行を除く）」で、ホストの statePatchSha256 と同じ定義。
+# 束縛先は merge-item なら issue 番号、merge-groups なら groups。別の呼び出し・別の issue 向けの patch を流用しても一致しない。
+# $1 = nonce、$2 = 束縛先、$3 = 期待する sha256。読み込みは旧プロンプトと同じく jq --slurpfile（コマンド行の長さの上限に
+# patch の大きさを依存させない）。
 verify_patch() {
-  local p="${f}.patch-$1.json" actual
-  [ -f "${p}" ] || fail "patch ファイルが無い（${p}）"
+  local actual
+  [ -f "${patch_src}" ] || fail "patch ファイルが無い（${patch_src}）"
+  patch_file=$(mktemp) || fail "一時ファイルを作れない"
+  cp -- "${patch_src}" "${patch_file}" || fail "patch ファイルを読めない（${patch_src}）"
   # $(...) は末尾の改行をすべて除く（Write ツールが末尾に改行を足しても同じ内容として扱う）
-  actual=$(printf '%s' "$(cat -- "${p}")" | so_sha256) || {
-    rm -f -- "${p}"
-    fail "patch の SHA-256 を計算できない"
-  }
-  if [ "${actual}" != "$2" ]; then
-    rm -f -- "${p}"
-    fail "patch の内容がホストの渡したものと一致しない（期待 $2・実測 ${actual}）"
+  actual=$(printf '%s\n%s\n%s' "$1" "$2" "$(cat -- "${patch_file}")" | so_sha256) || fail "patch の SHA-256 を計算できない"
+  if [ "${actual}" != "$3" ]; then
+    fail "patch の内容がホストの渡したものと一致しない（期待 $3・実測 ${actual}）"
   fi
-  patch_file=${p}
 }
 
 valid_sha() {
@@ -110,41 +128,42 @@ case "${cmd}" in
     [ -e "${f}" ] && fail "既にファイルがある（${f}）"
     mkdir -p -- "$(dirname -- "${f}")" || fail "ディレクトリを作れない"
     tmp=$(mktemp "${f}.XXXXXX") || fail "一時ファイルを作れない"
-    if jq -n --argjson parent "${parent}" --arg base "${base}" --argjson parallel "${parallel}" --argjson v "${version}" \
+    if ! jq -n --argjson parent "${parent}" --arg base "${base}" --argjson parallel "${parallel}" --argjson v "${version}" \
       '{parent: $parent, baseBranch: $base, parallel: $parallel, updatedAt: "", perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: $v, items: {}}' \
-      >"${tmp}" && mv -f "${tmp}" "${f}"; then
+      >"${tmp}"; then
+      rm -f -- "${tmp}"
+      fail "初期 JSON を書けない"
+    fi
+    # 「無いときだけ作る」を原子的にする: ln（ハードリンク）は置き先が既にあれば失敗する。mv -f だと、上の [ -e ] の
+    # 検査から置き換えまでの間に別の初期化・書き込みが作ったファイルを後勝ちで上書きし、項目を失いうる
+    if ln -- "${tmp}" "${f}" 2>/dev/null; then
+      rm -f -- "${tmp}"
       done_ok
     fi
-    rm -f "${tmp}"
-    fail "初期 JSON を書けない"
+    rm -f -- "${tmp}"
+    fail "既にファイルがある、または作れない（${f}）"
     ;;
   merge-item)
+    # nonce を先に確かめて後始末を登録する（以降の引数の誤り〔exit 2〕でも patch ファイルを残さない）
+    [ $# -ge 2 ] && arm_patch_cleanup "$2"
     [ $# -eq 3 ] || usage
     sf_valid_pos_int "$1" || usage
-    sf_valid_nonce "$2" || usage
     valid_sha "$3" || usage
     issue=$1
-    verify_patch "$2" "$3"
-    if sf_jq_write "${f}" --slurpfile patch "${patch_file}" --arg n "${issue}" --arg ts "$(sf_now)" \
-      '.items[$n] = ((.items[$n] // {}) + $patch[0]) | .updatedAt = $ts'; then
-      rm -f -- "${patch_file}"
-      done_ok
-    fi
-    rm -f -- "${patch_file}"
-    fail "jq / mv に失敗（${f}）"
+    verify_patch "$2" "${issue}" "$3"
+    sf_jq_write "${f}" --slurpfile patch "${patch_file}" --arg n "${issue}" --arg ts "$(sf_now)" \
+      '.items[$n] = ((.items[$n] // {}) + $patch[0]) | .updatedAt = $ts' || fail "jq / mv に失敗（${f}）"
+    done_ok
     ;;
   merge-groups)
+    [ $# -ge 1 ] && arm_patch_cleanup "$1"
     [ $# -eq 2 ] || usage
-    sf_valid_nonce "$1" || usage
     valid_sha "$2" || usage
-    verify_patch "$1" "$2"
-    if sf_jq_write "${f}" --slurpfile groups "${patch_file}" --arg ts "$(sf_now)" \
-      'reduce $groups[0][] as $g (.; reduce $g.numbers[] as $n (.; .items[($n|tostring)] = ((.items[($n|tostring)] // {}) + $g.patch))) | .updatedAt = $ts'; then
-      rm -f -- "${patch_file}"
-      done_ok
-    fi
-    rm -f -- "${patch_file}"
-    fail "jq / mv に失敗（${f}）"
+    verify_patch "$1" groups "$2"
+    sf_jq_write "${f}" --slurpfile groups "${patch_file}" --arg ts "$(sf_now)" \
+      'reduce $groups[0][] as $g (.; reduce $g.numbers[] as $n (.; .items[($n|tostring)] = ((.items[($n|tostring)] // {}) + $g.patch))) | .updatedAt = $ts' \
+      || fail "jq / mv に失敗（${f}）"
+    done_ok
     ;;
   clear-worktree)
     [ $# -eq 1 ] || usage

@@ -14,7 +14,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, copyFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +25,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = join(HERE, '..', 'scripts')
 const SAMPLE = readFileSync(join(HERE, '..', 'sample', 'state-example.json'), 'utf8')
 const BASHES = availableBashes()
-const { sha256Hex, canonicalJson, verifyLoadedItems } = await importDefinitions(['sha256Hex', 'canonicalJson', 'verifyLoadedItems'], 'state-scripts')
+const { sha256Hex, canonicalJson, verifyLoadedItems, statePatchSha256 } = await importDefinitions(['sha256Hex', 'canonicalJson', 'verifyLoadedItems', 'statePatchSha256'], 'state-scripts')
 
 // 旧プロンプト（state:load-verify）がエージェントに実行させていたシェル。f= の値だけを位置引数に置き換えた。
 const LEGACY_VERIFY = String.raw`f=$1; h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "@R@p" | while IFS= read -r k; do printf '%s %s\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`
@@ -172,7 +172,7 @@ for (const bash of BASHES) {
       writeFileSync(legacyFile, SAMPLE)
       writeFileSync(join(work, 'p.json'), patch)
       const legacy = legacyJq(legacyFile, ['--slurpfile', 'patch', join(work, 'p.json'), '.items["44"] = ((.items["44"] // {}) + $patch[0]) | .updatedAt = $ts', '--arg', 'ts', TS])
-      const r = run(bash, 'state-write.sh', ['merge-item', rel, '44', nonce, sha256Hex(patch)], { cwd: work })
+      const r = run(bash, 'state-write.sh', ['merge-item', rel, '44', nonce, statePatchSha256(nonce, 44, patch)], { cwd: work })
       assert.equal(r.status, 0, r.stderr)
       assert.equal(r.stdout, 'OK\n')
       const now = JSON.parse(readFileSync(join(work, rel), 'utf8'))
@@ -182,7 +182,7 @@ for (const bash of BASHES) {
       assert.deepEqual(readdirSync(join(work, '_', 'issue-trees')), ['7.json'], 'patch ファイル・一時ファイルを残さない')
       // 存在しない項目へのマージは項目を作る（旧式の // {} と同じ）
       writeFileSync(join(work, `${rel}.patch-${nonce}.json`), patch)
-      assert.equal(run(bash, 'state-write.sh', ['merge-item', rel, '99', nonce, sha256Hex(patch)], { cwd: work }).status, 0)
+      assert.equal(run(bash, 'state-write.sh', ['merge-item', rel, '99', nonce, statePatchSha256(nonce, 99, patch)], { cwd: work }).status, 0)
       assert.equal(JSON.parse(readFileSync(join(work, rel), 'utf8')).items['99'].status, 'blocked')
     })
   })
@@ -194,16 +194,90 @@ for (const bash of BASHES) {
       const patch = JSON.stringify({ status: 'blocked' })
       const nonce = 'abc123'
       writeFileSync(join(work, `${rel}.patch-${nonce}.json`), JSON.stringify({ status: 'merged' })) // 写し間違い
-      const r = run(bash, 'state-write.sh', ['merge-item', rel, '44', nonce, sha256Hex(patch)], { cwd: work })
+      const r = run(bash, 'state-write.sh', ['merge-item', rel, '44', nonce, statePatchSha256(nonce, 44, patch)], { cwd: work })
       assert.equal(r.status, 1)
       assert.equal(r.stdout, '')
       assert.match(r.stderr, /FAILED: patch の内容がホストの渡したものと一致しない/)
       assert.equal(readFileSync(join(work, rel), 'utf8'), before)
       assert.deepEqual(readdirSync(join(work, '_', 'issue-trees')), ['7.json'])
-      const missing = run(bash, 'state-write.sh', ['merge-item', rel, '44', nonce, sha256Hex(patch)], { cwd: work })
+      const missing = run(bash, 'state-write.sh', ['merge-item', rel, '44', nonce, statePatchSha256(nonce, 44, patch)], { cwd: work })
       assert.equal(missing.status, 1)
       assert.match(missing.stderr, /patch ファイルが無い/)
       assert.equal(readFileSync(join(work, rel), 'utf8'), before)
+    })
+  })
+
+  test(`${tag} state-write.sh: patch の照合値は nonce と issue 番号に束縛され、別の issue・別の nonce・groups への流用は書かない`, () => {
+    withWork((work) => {
+      const rel = seed(work, SAMPLE)
+      const before = readFileSync(join(work, rel), 'utf8')
+      const patch = JSON.stringify({ status: 'blocked' })
+      const pf = (n) => join(work, `${rel}.patch-${n}.json`)
+      // ホストの照合値はスクリプトと同じ定義（nonce + 改行 + 束縛先 + 改行 + patch）
+      assert.equal(statePatchSha256('n1', 44, patch), sha256Hex(`n1\n44\n${patch}`))
+      const attempts = [
+        ['merge-item', '45', 'n1', statePatchSha256('n1', 44, patch)], // 別の issue 向け
+        ['merge-item', '44', 'n2', statePatchSha256('n1', 44, patch)], // 別の呼び出し（nonce）向け
+        ['merge-item', '44', 'n1', sha256Hex(patch)], // 束縛しない旧来の値
+      ]
+      for (const [cmd, issue, nonce, sha] of attempts) {
+        writeFileSync(pf(nonce), patch)
+        const r = run(bash, 'state-write.sh', [cmd, rel, issue, nonce, sha], { cwd: work })
+        assert.equal(r.status, 1, `${issue} ${nonce}`)
+        assert.match(r.stderr, /一致しない/)
+      }
+      writeFileSync(pf('n1'), JSON.stringify([{ numbers: [44], patch: { status: 'x' } }]))
+      assert.equal(run(bash, 'state-write.sh', ['merge-groups', rel, 'n1', statePatchSha256('n1', 44, JSON.stringify([{ numbers: [44], patch: { status: 'x' } }]))], { cwd: work }).status, 1)
+      assert.equal(readFileSync(join(work, rel), 'utf8'), before)
+      assert.deepEqual(readdirSync(join(work, '_', 'issue-trees')), ['7.json'])
+    })
+  })
+
+  test(`${tag} state-write.sh: patch を扱うサブコマンドは引数の誤り（exit 2）でも patch ファイルを消す。nonce が不正なら何も消さない`, () => {
+    withWork((work) => {
+      const rel = seed(work, SAMPLE)
+      const pf = (n) => join(work, `${rel}.patch-${n}.json`)
+      const cases = [
+        ['merge-item', rel, '0', 'abc', 'a'.repeat(64)],
+        ['merge-item', rel, '44', 'abc', 'short'],
+        ['merge-item', rel, '44', 'abc'],
+        ['merge-groups', rel, 'abc', 'short'],
+        ['merge-groups', rel, 'abc'],
+      ]
+      for (const args of cases) {
+        writeFileSync(pf('abc'), '{}')
+        const r = run(bash, 'state-write.sh', args, { cwd: work })
+        assert.equal(r.status, 2, args.join(' '))
+        assert.equal(existsSync(pf('abc')), false, `patch ファイルが残る: ${args.join(' ')}`)
+      }
+      // nonce が不正（パスを組み立てられない）なら消さない
+      writeFileSync(pf('ABC'), '{}')
+      assert.equal(run(bash, 'state-write.sh', ['merge-item', rel, '44', 'ABC', 'a'.repeat(64)], { cwd: work }).status, 2)
+      assert.equal(existsSync(pf('ABC')), true)
+      assert.equal(readFileSync(join(work, rel), 'utf8'), SAMPLE)
+    })
+  })
+
+  test(`${tag} state-write.sh: patch の照合と読み込みは同じ写しに対して行う（元ファイルを直接 --slurpfile で読まない）`, () => {
+    const src = readFileSync(join(SCRIPTS, 'state-write.sh'), 'utf8')
+    assert.match(src, /patch_file=\$\(mktemp\)/)
+    assert.match(src, /cp -- "\$\{patch_src\}" "\$\{patch_file\}"/)
+    assert.match(src, /--slurpfile patch "\$\{patch_file\}"/)
+    assert.match(src, /--slurpfile groups "\$\{patch_file\}"/)
+    assert.doesNotMatch(src, /--slurpfile \w+ "\$\{patch_src\}"/)
+  })
+
+  test(`${tag} state-write.sh create: 置き先は ln で作り、[ -e ] の検査のあとに現れたものも上書きしない`, () => {
+    withWork((work) => {
+      // [ -e ] では「無い」と見えるが名前は使われている状態（壊れたシンボリックリンク）で、ln の失敗に倒れることを確かめる
+      mkdirSync(join(work, '_', 'issue-trees'), { recursive: true })
+      const rel = '_/issue-trees/5.json'
+      symlinkSync('nowhere.json', join(work, rel))
+      const r = run(bash, 'state-write.sh', ['create', rel, '5', 'main', '1', '2'], { cwd: work })
+      assert.equal(r.status, 1)
+      assert.match(r.stderr, /^FAILED: /)
+      assert.equal(readlinkSync(join(work, rel)), 'nowhere.json', '既存の名前を置き換えない')
+      assert.deepEqual(readdirSync(join(work, '_', 'issue-trees')), ['5.json'], '一時ファイルを残さない')
     })
   })
 
@@ -217,7 +291,7 @@ for (const bash of BASHES) {
       writeFileSync(legacyFile, SAMPLE)
       writeFileSync(join(work, 'g.json'), groups)
       const legacy = legacyJq(legacyFile, ['--slurpfile', 'groups', join(work, 'g.json'), '--arg', 'ts', TS, 'reduce $groups[0][] as $g (.; reduce $g.numbers[] as $n (.; .items[($n|tostring)] = ((.items[($n|tostring)] // {}) + $g.patch))) | .updatedAt = $ts'])
-      const r = run(bash, 'state-write.sh', ['merge-groups', rel, nonce, sha256Hex(groups)], { cwd: work })
+      const r = run(bash, 'state-write.sh', ['merge-groups', rel, nonce, statePatchSha256(nonce, 'groups', groups)], { cwd: work })
       assert.equal(r.status, 0, r.stderr)
       assert.deepEqual(stripTs(JSON.parse(readFileSync(join(work, rel), 'utf8'))), stripTs(legacy))
       assert.deepEqual(readdirSync(join(work, '_', 'issue-trees')), ['7.json'])

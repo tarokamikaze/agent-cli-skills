@@ -15,6 +15,9 @@
 #             RATE_LIMIT core <remaining> <resetAt> <waitSeconds>   エラーにレート制限の語がある、または HTTP 403 / 429 で
 #                                                                    gh api rate_limit の core の remaining が 0
 #                                                                    （resetAt は ISO 8601 UTC、waitSeconds は復帰までの秒数）
+#                                                                    エラーにレート制限の語があっても core の remaining が 0 で
+#                                                                    ないとき・取得できないときは resetAt・waitSeconds を - にする
+#                                                                    （core の reset まで待たせない。ホストが固定の短い待機をする）
 #             RATE_LIMIT secondary                                   エラーに secondary rate limit がある（retry-after は取れない）
 #             権限・SSO など他の 403 では RATE_LIMIT 行を出さない（通常の失敗）。
 # 終了コード:
@@ -52,7 +55,7 @@ rate_reported=0
 
 # gh の標準エラー（errf）からレート制限を判定し、該当すれば RATE_LIMIT 行を標準エラーへ 1 回だけ出す。
 report_rate_limit() {
-  local core
+  local core remaining
   [ "${rate_reported}" = 0 ] || return 0
   if grep -qi 'secondary rate limit' "${errf}"; then
     echo "RATE_LIMIT secondary" >&2
@@ -67,9 +70,14 @@ report_rate_limit() {
         rate_reported=1
         ;;
       *)
-        # エラーにレート制限の語があるのに core に残りがある場合も、レート制限として報告する（旧手順と同じ判定）
+        # エラーにレート制限の語があるのに core に残りがある（または取得できない）場合も、レート制限として報告する
+        # （旧手順と同じ判定）。ただし resetAt・waitSeconds は core が枯渇したときだけ返す（旧手順と同じ）。core の
+        # reset は最大約 1 時間先で、枯渇していない core の待ち時間を返すとホストの待機上限を超えて止まるため、
+        # - にしてホストの固定の短い待機に任せる
         if grep -qiE 'rate limit|RATE_LIMITED' "${errf}"; then
-          echo "RATE_LIMIT core ${core:-- - -}" >&2
+          remaining=${core%% *}
+          [ -n "${remaining}" ] || remaining=-
+          echo "RATE_LIMIT core ${remaining} - -" >&2
           rate_reported=1
         fi
         ;;

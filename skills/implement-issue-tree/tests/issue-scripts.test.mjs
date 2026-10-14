@@ -173,6 +173,8 @@ for (const bash of BASHES) {
       ['HTTP 403: Resource protected by organization SAML enforcement', 0, /^RATE_LIMIT core 0 /m],
       ['HTTP 403: Must have admin rights', 4999, null],
       ['HTTP 429: Too Many Requests', 4999, null],
+      // レート制限の語があっても core が枯渇していなければ、core の reset までの秒数を返さない（ホストの待機上限を超えさせない）
+      ['API rate limit exceeded for installation', 4999, /^RATE_LIMIT core 4999 - -$/m],
     ]
     for (const [err, remaining, want] of cases) {
       const g = setup({ 'err-issue-1': err, 'err-issue-2': err, 'rate.json': { resources: { core: { remaining, reset: future } } } })
