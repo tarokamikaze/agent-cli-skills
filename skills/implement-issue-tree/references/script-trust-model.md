@@ -123,7 +123,28 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - `external-check-runs.sh`・`review-state-counts.sh`・`checks-state-counts.sh` は、旧コマンドがページごとに出していた JSON の配列（`[{"v":..., "count":...}]`）ではなく、全ページを合算した `<値> <件数>` の行を出す。どの値も agent が読むだけで、ホストの照合・スキーマには渡らない
 - `unresolved-threads.sh` の一覧は、旧手順の GraphQL の生の応答ではなく、未解決スレッドだけの行（`threadId`・`path`・`url`・`author`・`body`）を出す。`body` は `<untrusted-data source="review-comment">` で囲む（ホストの `untrusted()` と同じく、本文中の境界タグに似た文字列は `(untrusted-data)` に置き換える）。agent が返す `unresolvedComments` の形は変えていない
 
-回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする。
+回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする（範囲 B は次の第 4 弾で消した）。
+
+## 第 4 弾: マージ実行の G0 とマージのコマンド（Issue #11 の範囲 B）
+
+merge-exec の手順 2b（G0 ゲート: ベースブランチのサーバー側強制の実測）は、`gh api ... | jq` の多段・`{}` と `|` を含む `--jq`・`HEAD_SHA` / `REQ` / `RSC` / `APP_ID_<SLUG>` の代入を「1 回の Bash 実行でまとめて」流させていた。手順 5 のマージも `HEAD_SHA="<sha>"; gh pr merge ... --match-head-commit "$HEAD_SHA"` だった。どちらも上の (c)・(d) に当たる。
+
+| 置き換えた手順 | 新しい形 | 出力 |
+|----------------|----------|------|
+| 手順 2b (i)〜(v-b) | `g0-check.sh <URL エンコード済みのベースブランチ名> <HEAD sha> [<slug>:<エンコード済みの context>...]` | 判定ごとの `<判定名> <値>` の行（固定の 9 種。値は件数・`true` / `false`・取得や計算に失敗したら `error`）と、最後の `verdict <pass / classic-unsupported / server-enforcement-missing / issuer-unbound / checks-not-green>`。終了コードは pass のときだけ 0 |
+| 手順 5 | `gh pr merge <N> --squash --delete-branch --match-head-commit <HEAD sha>`（手順 2 で固定した 40 桁の sha を値として直接書く単独のコマンド） | `gh pr merge` のまま |
+
+- 判定の jq の式・判定の順序・辞退の reason は旧プロンプトと同じ。旧手順と同じく、不合格（取得の失敗を含む）になった判定でそれより後の判定を行わずに終わる。required context の式は `lib/gh-read.sh` の `gr_required_contexts_of_pages` を monitor 手順 3g の `required-context-missing.sh` と共用する
+- (iv) の context は任意の文字列（空白・引用符・`{}` を含みうる）なので、ホストが英数字・`.`・`_`・`-` 以外の全バイトを `%XX`（大文字、UTF-8 のバイト単位）にして渡し（`g0ContextArg`）、スクリプトが元に戻して `jq --arg` に値で渡す。コマンド行に引用符と `{}` は載らない。制御文字（`%00`〜`%1F`・`%7F`）・小文字の 16 進・slug の形式違いは使い方の誤り（exit 2）
+- 信頼の水準は旧プロンプトと同じで、変えていない。G0 を判定して辞退するかを決めるのは旧手順と同じ merge-exec の agent で、読む値（件数・真偽値）も同じ。スクリプトにしたことで変わるのは、jq の式・取得の失敗の扱い・判定の順序を agent が書き間違える余地が無くなることと、launcher のハッシュ照合で版ずれ・書き換えを起動前に止められることである。マージの実強制は従来どおり、G0 が実測するサーバー側の強制（ruleset の required status checks・レビュースレッド解消の必須化・`--match-head-commit`）が持つ（上の「測定値の使い方」の (b)）
+
+旧手順と違う点（互換性の注記）:
+
+- ルール（`rules/branches`）と HEAD sha 上の check-run は 1 回ずつだけ取得し、各判定で使い回す。旧手順は判定ごとに同じ API を取り直していた。取り直しの間に ruleset や check-run が変わった場合の値は旧手順と違いうるが、1 回の取得に揃えたほうが判定どうしの前提が食い違わない
+- 取得の失敗の判定の割り当てを明記した。(i) の失敗は classic-unsupported（旧手順の「(i) が 0 件またはエラー」）、(v-b) の 2 つ目の値の計算の失敗は issuer-unbound（旧手順は「1 つ目が 1 以上・取得不能・RSC の取得失敗」を issuer-unbound としていて、2 つ目の取得不能の行き先を明記していなかった。合格にも一過性の checks-not-green にも倒さない側にした）
+- verdict 行が無い・値が想定外・`run-verified.sh` の照合失敗は、merge-exec が server-enforcement-missing として辞退する
+
+回帰防止は `tests/g0-check.test.mjs` で行う。旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`tests/lib/fake-gh.sh`。ruleset と App ID の応答も返す）で同じ入力に対して旧コマンドを実行し、旧プロンプトの判定の手順どおりに読んだ行と verdict が、スクリプトの出力とバイト単位で一致することを、合格・各判定の不合格・各取得の失敗・引用符と非 ASCII を含む context の各場合で確かめる。`/bin/bash`（3.2）と Homebrew の bash の両方で走る。
 
 ## 関連
 

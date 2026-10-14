@@ -196,13 +196,14 @@ test('mergeExecutePrompt: 新規マージ経路（allowMerge=true）は G0 の�
   assert.ok(prompt.includes('"Repository"'))
   // (iii) レビュースレッド解消のサーバー側強制。
   assert.ok(prompt.includes('required_review_thread_resolution'))
+  // G0 の判定は同梱の g0-check.sh が行い、agent は 1 コマンドで起動して verdict を読む（Issue #11 の範囲 B）。
+  assert.ok(prompt.includes(' g0-check.sh main <HEAD sha> cursor:Cursor%20Bugbot'))
+  assert.ok(prompt.includes('verdict pass'))
+  // 旧手順の変数・jq の多段は残っていない（agent にシェルを組み立てさせない）。
+  for (const old of ['HEAD_SHA=', 'REQ=$(', 'RSC=$(', 'APP_ID_', '--argjson', '| jq ']) assert.ok(!prompt.includes(old), old)
   // (iv) 宣言 context + App ID（integration_id）の組による required 化の照合。
-  // App ID は App ごとに一意な変数（APP_ID_<SLUG>）で束縛される（共有 $APP_ID は使わない）。
   assert.ok(prompt.includes('(iv)'))
-  assert.ok(prompt.includes(`APP_ID_CURSOR=$(gh api "apps/cursor" --jq '.id')`))
-  assert.ok(prompt.includes('--argjson appid "$APP_ID_CURSOR"'))
-  assert.ok(!prompt.includes('--argjson appid "$APP_ID"'))
-  assert.ok(prompt.includes(`--arg ctx 'Cursor Bugbot'`))
+  assert.ok(prompt.includes('App "cursor" の context "Cursor Bugbot"'))
   // (v) client-only チェックの検出（required に含まれない check-run / commit status の件数照合）。
   assert.ok(prompt.includes('(v)'))
   assert.ok(prompt.includes('client-only'))
@@ -230,33 +231,23 @@ test('mergeExecutePrompt: G0 は strict 適用を要件にしない（並列ラ�
   assert.ok(!prompt.includes('(i-c) の strict 適用なし'))
 })
 
-test('mergeExecutePrompt: 複数 App 宣言時は G0 (iv) が App ごとに slug と APP_ID 取得を対で出力する', () => {
-  // 回帰テスト（下流 rust-ai-library PR #456 Bugbot Medium）: 全 context が共有 $APP_ID に
-  // 束縛されると、後続 App の context が先行 App の APP_ID と照合されて正しい ruleset でも
-  // fail する。App ごとに「slug での取得 → その App 専用変数での照合」が対で現れること。
+test('mergeExecutePrompt: 複数 App 宣言時は G0 (iv) の照合対象が App ごとの slug:context の組で g0-check.sh に渡る', () => {
+  // 回帰テスト（下流 rust-ai-library PR #456 Bugbot Medium）: 全 context が共有の App ID に
+  // 束縛されると、後続 App の context が先行 App の App ID と照合されて正しい ruleset でも
+  // fail する。各 context は自分の App の slug と対で渡り、App ID の取得と照合は g0-check.sh が
+  // App ごとに行う（ci-scripts の g0-check.sh のテストが、別 App の ID を流用しないことを確かめる）。
   const prompt = mergeExecutePrompt(item, impl, true, [
     { app: 'cursor', contexts: ['Cursor Bugbot'] },
     { app: 'sonarqubecloud', contexts: ['SonarQubeCloud Code Analysis', 'quality gate'] },
   ])
-  // App ごとの取得コマンドが slug とセットでインライン出力される。
-  assert.ok(prompt.includes(`APP_ID_CURSOR=$(gh api "apps/cursor" --jq '.id')`))
-  assert.ok(prompt.includes(`APP_ID_SONARQUBECLOUD=$(gh api "apps/sonarqubecloud" --jq '.id')`))
-  // 各 context の照合コマンドが自 App の変数のみを参照する（他 App の変数と混線しない）。
-  const cursorLine = prompt.split('\n').find((l) => l.includes(`--arg ctx 'Cursor Bugbot'`))
-  assert.ok(cursorLine.includes('--argjson appid "$APP_ID_CURSOR"'))
-  for (const ctx of ['SonarQubeCloud Code Analysis', 'quality gate']) {
-    const line = prompt.split('\n').find((l) => l.includes(`--arg ctx '${ctx}'`))
-    assert.ok(line.includes('--argjson appid "$APP_ID_SONARQUBECLOUD"'))
-    assert.ok(!line.includes('$APP_ID_CURSOR'))
-  }
-  // 共有変数 $APP_ID（後続 App が先行 App の値を引きずる形）はどこにも現れない。
-  assert.ok(!prompt.includes('--argjson appid "$APP_ID"'))
-  // slug にハイフンを含む App も一意な変数名（ハイフン→アンダースコア）で束縛される。
-  const hyphenPrompt = mergeExecutePrompt(item, impl, true, [
-    { app: 'my-check-app', contexts: ['my check'] },
+  const line = prompt.split('\n').find((l) => l.includes(' g0-check.sh main '))
+  assert.ok(line.endsWith(' g0-check.sh main <HEAD sha> cursor:Cursor%20Bugbot sonarqubecloud:SonarQubeCloud%20Code%20Analysis sonarqubecloud:quality%20gate'), line)
+  // slug にハイフンを含む App、引用符・{}・非 ASCII を含む context も、引用符と {} を使わない 1 引数になる。
+  const odd = mergeExecutePrompt(item, impl, true, [
+    { app: 'my-check-app', contexts: [`it's {a|b} "日本" (x)*!~`] },
   ])
-  assert.ok(hyphenPrompt.includes(`APP_ID_MY_CHECK_APP=$(gh api "apps/my-check-app" --jq '.id')`))
-  assert.ok(hyphenPrompt.includes('--argjson appid "$APP_ID_MY_CHECK_APP"'))
+  const oddLine = odd.split('\n').find((l) => l.includes(' g0-check.sh main '))
+  assert.ok(oddLine.endsWith(' g0-check.sh main <HEAD sha> my-check-app:it%27s%20%7Ba%7Cb%7D%20%22%E6%97%A5%E6%9C%AC%22%20%28x%29%2A%21%7E'), oddLine)
 })
 
 test('mergeExecutePrompt: G0 の辞退 reason 名は返却スキーマの enum と一致した形でプロンプトに現れる', () => {
