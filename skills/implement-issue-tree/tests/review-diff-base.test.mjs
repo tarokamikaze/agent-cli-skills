@@ -255,7 +255,7 @@ test('群D: reviewPrompt は fetch 失敗と fetch 後の解決失敗の両方�
 test('群D: 0b-b のリモートブランチ回復経路でも base を refspec 付きで取得する', () => {
   assert.match(
     source,
-    /git fetch origin <branch> && git checkout -B <branch> origin\/<branch>[\s\S]{0,400}git fetch origin \$\{baseBranch\}:refs\/remotes\/origin\/\$\{baseBranch\}/,
+    /git fetch origin <branch>[\s\S]{0,120}git checkout -B <branch> origin\/<branch>[\s\S]{0,400}git fetch origin \$\{baseBranch\}:refs\/remotes\/origin\/\$\{baseBranch\}/,
   )
 })
 

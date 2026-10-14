@@ -73,7 +73,7 @@ const {
   MERGE_CONTEXT_COMMON,
 } = await import(pathToFileURL(slicePath).href)
 
-// jq の式・GraphQL のクエリは同梱スクリプトにある（Issue #300 の追跡）。テストは同じファイルから値を取り出して検証する。
+// jq の式・GraphQL のクエリは同梱スクリプトにある（利用側のリポジトリで観測した権限確認によるランの停止への対応）。テストは同じファイルから値を取り出して検証する。
 const SCRIPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts')
 const libVar = (name) => execFileSync('bash', ['-c', `. "$1" && printf '%s' "$${name}"`, '_', join(SCRIPTS_DIR, 'lib', 'issue-jq.sh')]).toString()
 const OUT_OF_TREE_STATE_SIG_JQ = libVar('OUT_OF_TREE_STATE_SIG_JQ')

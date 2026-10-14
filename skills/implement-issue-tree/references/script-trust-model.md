@@ -63,7 +63,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - 同期で届くのはスキルディレクトリ全体（Workflow とスクリプトを同じコミットで）なので、通常は版ずれは起きない。`run-verified.sh` が exit 3 を出したときは、スキルの同期が途中か、スクリプトがローカルで変更されている。同期し直す。
 - 新しいスクリプトを足すとき: `scripts/` 直下に `*.sh`（小文字・数字・`-`・`.`）で置き、`SCRIPT_SHA256` に目印を足し、`bash <skillDir>/scripts/run-verified.sh` 経由で起動する（ホストは `scriptCommand` で組み立てる）。測定値のように自己申告の転記を照合する手段が他に無い出力は封筒で返し、旧プロンプトの出力をホストが既に照合している手順（第 2 弾）は旧出力と同じ形式で返す。共通の関数は `scripts/lib/*.sh`（source 専用。全スクリプトのハッシュに入る）に置く。冒頭コメントに入力・出力・終了コードを書く。`bash 3.2`（macOS）と GNU の両方で動く書き方に限る（`paste`・`bc`・GNU 専用フラグ・`date -d`・`sed -i`・`mapfile`・連想配列を使わない）。
 
-## 第 2 弾: 状態ファイル・GitHub の読み書き（y-backend#300 の追跡）
+## 第 2 弾: 状態ファイル・GitHub の読み書き
 
 エージェントがその場で組み立てるシェル（関数定義・`$(...)` の入れ子・`{}` と引用符を含む jq の式・`;` / `&&` / `|` の連結・HEREDOC）は、書き方が毎回変わり、Claude Code の権限確認（auto mode の分類器・展開による難読化の検査）がランのたびに出て、人が答えるまでランが止まった。そこで次の手順を同梱スクリプトへ移し、エージェントには `bash '<skillDir>/scripts/run-verified.sh' <sha256> <name>.sh <引数>` の 1 コマンドだけを実行させる。引数はホストが検証した整数・状態ファイルのパス・nonce・ハッシュだけで、`{}` と引用符を含めない。
 
@@ -93,6 +93,37 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - `fetch-tree.sh` の `NODE` 行のタイトルは jq の `@tsv` でエスケープされる（タブ・改行・CR・`\` が `\t`・`\n`・`\r`・`\\` になる）。旧手順は agent が API の値をそのまま写していたため、これらの文字を含むタイトルは `nodes[].title` の文字列が旧と異なりうる。タイトルはログの表示と、agent への説明（非信頼データとして囲んで渡す）にだけ使い、ホストの照合・依存・実行順・ブランチ名には使わないため、判定は変わらない（タブ・改行を含むタイトルは agent への説明でエスケープ表記のまま見える）
 - `probe-declared-deps.sh` のレート制限は旧手順の判定どおりで、`resetAt`・`waitSeconds` は core が枯渇したときだけ返す（それ以外は `-`。ホストが固定の短い待機をする）
 - `state-write.sh` の `create` は置き先を `ln`（ハードリンク）で作るため、ハードリンク非対応のファイルシステム（exFAT・一部のネットワークマウントなど）に `_/issue-trees/` があると初期作成が失敗する（fail-closed。状態ファイルを作れずランは開始時に停止する。旧手順はリダイレクトで書いていたので失敗しなかった）
+
+## 第 3 弾: CI 監視・マージ実行の読み取り（Issue #11 の範囲 A）
+
+利用側では、PreToolUse の Bash の hook で次の 4 つの形を拒否することを想定している。hook は Workflow の agent とほかの agent を区別できないので、プロンプトがこの形のコマンドを agent に実行させると、利用側でランが止まる。
+
+- (a) `cd <dir>` の後に `&&`・`;` で別のコマンドをつなぐ（`$(...)` の中も含む）
+- (b) ファイルの中身を読む `sed -n`・`cat <file>`・`head <file>`・`tail <file>`（パイプの右側で標準入力を読む形・ヒアドキュメントは対象外）
+- (c) `;`・`&&` で 3 本以上のコマンドをつなぐ（for / while / if の中のコマンド、変数の代入も 1 本と数える）
+- (d) `gh` の `--jq`・`-q` の式に `{`・`[`・`|` を含む
+
+毎回のランで当たっていた読み取りだけの手順を、第 2 弾と同じ形（`run-verified.sh` 経由の 1 コマンド。引数はホストが検証した整数・sha・App slug・URL エンコード済みのブランチ名と、agent が 40 桁の sha に置き換える `<HEAD sha>` などの目印だけ）へ移した。単独のコマンドで済むもの（PR 作成の `git rev-parse --verify`、Implement・recover-implement・fix の `git fetch` と `git checkout`）は、スクリプトにせず「1 回の Bash 呼び出しで 1 本ずつ」と書いた文面にした。
+
+| スクリプト | 置き換えた手順 | 出力 |
+|------------|----------------|------|
+| `nonce-seed.sh` | 境界トークンの seed（`head -c 32 /dev/urandom \| od -An -tx1 \| tr -d ' \n'`） | 旧コマンドと同じ（小文字 16 進 64 桁・改行なし） |
+| `checks-total.sh` | monitor 手順 2・push 後の CI 起動確認のチェック総数（`--jq '.total_count'` と `--jq '.statuses \| length'` の 2 本と、agent の暗算） | 合計の整数 1 個。どちらかの取得に失敗したら何も出さず非 0（0 件と区別する） |
+| `compare-files.sh` | monitor 手順 1b の compare（`--jq '{status:...,files:[...]}'`） | 旧コマンドとバイト単位で同じ JSON |
+| `external-check-runs.sh` | monitor 4a・4x、merge-exec 4b の外部チェック App の check-run（ページごとの `group_by` と agent の合算） | `<値> <件数>` の行（全ページを合算済み）。0 件は出力なし、取得失敗は非 0 |
+| `required-context-missing.sh` | autoMerge のランの monitor 手順 3g（`REQ`・`CR`・`ST`・`HAVE` の代入と jq を `&&` で 5 本つないだ 1 行） | 不足件数の整数 1 個（旧コマンドと同じ値）。required context と HEAD 上の context の取得は `lib/gh-read.sh` にあり、G0 の (v) と共用できる |
+| `unresolved-threads.sh` | monitor 手順 5・merge-exec 手順 4 の GraphQL の疑似ループ | 一覧は未解決スレッド 1 件につき 1 行の JSON と `TOTAL <件数>`、`--count` は件数だけ。クエリは旧プロンプトと同じで、`--count` はコメントを取得しない。途中のページの失敗は何も出さず非 0 |
+| `checks-state-counts.sh` | merge-exec 手順 3 の `gh pr checks --json state --jq '[.[].state] \| group_by(.) ...'` | `<状態> <件数>` の行。終了コードは `gh pr checks` のものをそのまま返す（旧コマンドと同じ） |
+| `review-state-counts.sh` | merge-exec 4b のレビュー状態の集計（`--jq "[.[] \| select(.user.login == ...)] \| group_by(.) ..."` と agent の合算） | `<state> <件数>` の行（全ページを合算済み）。レビュー本文は出さない |
+
+信頼の水準は旧プロンプトと同じで、変えていない。merge-exec の手順 3・4・4b の出力はマージ可否の判定に使われるが、判定するのは旧手順と同じ merge-exec の agent で、読む値（状態 enum ごとの件数・未解決スレッドの件数）も同じである。スクリプトにしたことで変わるのは、ページの合算を agent の暗算でなくスクリプトが行うことと、取得の失敗を 0 件と区別して非 0 で返すことだけで、マージの実強制は従来どおり G0 で実測するサーバー側の強制（ruleset の required status checks・レビュースレッド解消の必須化・`--match-head-commit`）が持つ（上の「測定値の使い方」の (b)）。
+
+出力の形式で旧手順と違う点（互換性の注記）:
+
+- `external-check-runs.sh`・`review-state-counts.sh`・`checks-state-counts.sh` は、旧コマンドがページごとに出していた JSON の配列（`[{"v":..., "count":...}]`）ではなく、全ページを合算した `<値> <件数>` の行を出す。どの値も agent が読むだけで、ホストの照合・スキーマには渡らない
+- `unresolved-threads.sh` の一覧は、旧手順の GraphQL の生の応答ではなく、未解決スレッドだけの行（`threadId`・`path`・`url`・`author`・`body`）を出す。`body` は `<untrusted-data source="review-comment">` で囲む（ホストの `untrusted()` と同じく、本文中の境界タグに似た文字列は `(untrusted-data)` に置き換える）。agent が返す `unresolvedComments` の形は変えていない
+
+回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする。
 
 ## 関連
 
