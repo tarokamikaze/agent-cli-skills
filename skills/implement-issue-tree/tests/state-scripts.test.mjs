@@ -4,8 +4,11 @@
 // state.sh の標準入力の経路・hw-max / hw-set・並行書き込みの検知は upstream の state-script.test.mjs が見る。
 //
 // 検証する契約（ホストの照合は変えていないので、スクリプトは旧プロンプトのシェルと同じ出力・同じ書き込みをする）:
-//   - state-verify.sh の出力は、旧プロンプトの 1 行のシェル（下の LEGACY_VERIFY）とバイト単位で同じ。行範囲の分割実行も同じ
-//   - その出力をエージェントと同じ規則で転記すると、ホストの照合（keysSha256・keysCount・項目ごとの hashes）が成立する
+//   - state-verify.sh の出力は、2 行目（高水位。HIGHWATER bytes=<n> version=<n> のラベル付きにした）を除いて
+//     旧プロンプトの 1 行のシェル（下の LEGACY_VERIFY）とバイト単位で同じ。行範囲の分割実行も同じ
+//   - その先頭 2 行をそのまま返すと、ホストの分解（parseStateVerifyHeader）と照合（keysSha256・keysCount・高水位・
+//     項目ごとの hashes）が成立する
+//   - state-read.sh summary は OK count=<件数> bytes=<高水位> version=<版>（ラベル付き）を出し、create の出力と合わせてホストが分解する
 //   - state-read.sh keys の出力は旧プロンプトの jq -c --argjson k ... と同じ値
 //   - state.sh の入力ファイルの経路は、ホストが渡した SHA-256（nonce とモードを束縛）と一致するときだけ書き、入力ファイルは成否に関わらず消す
 //   - state.sh create / clear-worktree は旧プロンプトと同じ内容を書く。create は既存のファイルを上書きしない
@@ -26,12 +29,25 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = join(HERE, '..', 'scripts')
 const SAMPLE = readFileSync(join(HERE, '..', 'sample', 'state-example.json'), 'utf8')
 const BASHES = availableBashes()
-const { sha256Hex, canonicalJson, verifyLoadedItems, stateInputSha256 } = await importDefinitions(['sha256Hex', 'canonicalJson', 'verifyLoadedItems', 'stateInputSha256'], 'state-scripts')
+const { sha256Hex, canonicalJson, verifyLoadedItems, stateInputSha256, parseStateVerifyHeader, isValidStateVerifyResult, parseStateLoadSummary, isStateLoadValueMalformed } = await importDefinitions(
+  ['sha256Hex', 'canonicalJson', 'verifyLoadedItems', 'stateInputSha256', 'parseStateVerifyHeader', 'isValidStateVerifyResult', 'parseStateLoadSummary', 'isStateLoadValueMalformed'],
+  'state-scripts',
+)
 
 // 旧プロンプト（state:load-verify）がエージェントに実行させていたシェル。f= の値だけを位置引数に置き換えた。
 const LEGACY_VERIFY = String.raw`f=$1; h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "@R@p" | while IFS= read -r k; do printf '%s %s\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`
   // テンプレートの ${...} と衝突するため、旧コマンドの "${R:-1,\$}" は後から差し込む
   .replace('@R@', '${R:-1,\\$}')
+// 旧コマンドとの違いは 2 行目だけ: 旧 [<高水位>,<版>] を HIGHWATER bytes=<高水位> version=<版> にした
+// （ラベルの無い配列を、小さいモデルが位置を取り違えて転記したため。Issue #23）。
+const labelHighWater = (out) => {
+  const lines = out.split('\n')
+  if (lines[0].startsWith('KEYS ')) {
+    const [b, v] = JSON.parse(lines[1])
+    lines[1] = `HIGHWATER bytes=${b} version=${v}`
+  }
+  return lines.join('\n')
+}
 
 // 旧プロンプトの書き込み（jq の式）。updatedAt は呼び出しごとに変わるので固定値を渡し、比較では除く。
 const TS = '2026-01-01T00:00:00Z'
@@ -88,7 +104,7 @@ const MIXED = JSON.stringify({
 for (const bash of BASHES) {
   const tag = `[${bash}]`
 
-  test(`${tag} state-verify.sh の出力は旧プロンプトのシェルとバイト単位で同じ（ファイルなし・サンプル・混在キー・空 items・行範囲）`, () => {
+  test(`${tag} state-verify.sh の出力は、高水位の行（HIGHWATER bytes=<n> version=<n>）を除いて旧プロンプトのシェルとバイト単位で同じ（ファイルなし・サンプル・混在キー・空 items・行範囲）`, () => {
     withWork((work) => {
       const cases = [
         ['nofile', null],
@@ -104,25 +120,26 @@ for (const bash of BASHES) {
         const legacy = spawnSync(bash, ['-c', LEGACY_VERIFY, '_', rel], { encoding: 'utf8', cwd: work })
         const now = run(bash, 'state-verify.sh', [rel], { cwd: work })
         assert.equal(now.status, 0, now.stderr)
-        assert.equal(now.stdout, legacy.stdout, name)
+        assert.equal(now.stdout, labelHighWater(legacy.stdout), name)
         // 行範囲（キー行だけを分割）。旧コマンドの R=2,3 と新しい引数 2 3 が同じ
         const legacyR = spawnSync(bash, ['-c', LEGACY_VERIFY, '_', rel], { encoding: 'utf8', cwd: work, env: { ...process.env, R: '2,3' } })
         const nowR = run(bash, 'state-verify.sh', [rel, '2', '3'], { cwd: work })
-        assert.equal(nowR.stdout, legacyR.stdout, `${name} 範囲`)
+        assert.equal(nowR.stdout, labelHighWater(legacyR.stdout), `${name} 範囲`)
       }
     })
   })
 
-  test(`${tag} state-verify.sh の出力をエージェントの規則で転記すると、ホストの照合（keysSha256・keysCount・hashes）が成立する`, () => {
+  test(`${tag} state-verify.sh の先頭 2 行をそのまま返すと、ホストの分解と照合（keysSha256・keysCount・高水位・hashes）が成立する`, () => {
     withWork((work) => {
       const rel = seed(work, MIXED)
       const out = run(bash, 'state-verify.sh', [rel], { cwd: work }).stdout.trimEnd().split('\n')
-      const [, keysSha256, keysCount] = out[0].split(' ')
-      const [hw, hwv] = JSON.parse(out[1])
+      const head = parseStateVerifyHeader(out.slice(0, 2).join('\n'))
+      assert.ok(head, out.slice(0, 2).join('\n'))
       const hashes = Object.fromEntries(out.slice(2).map((l) => l.split(' ')))
-      assert.equal(sha256Hex(canonicalJson(Object.keys(hashes).sort())), keysSha256)
-      assert.equal(Object.keys(hashes).length, Number(keysCount))
-      assert.deepEqual([hw, hwv], [5489787, 2])
+      assert.equal(sha256Hex(canonicalJson(Object.keys(hashes).sort())), head.keysSha256)
+      assert.equal(Object.keys(hashes).length, head.keysCount)
+      assert.deepEqual([head.highWaterBytes, head.highWaterVersion], [5489787, 2])
+      assert.equal(isValidStateVerifyResult({ headerLines: out.slice(0, 2).join('\n'), hashes }), true)
       const items = JSON.parse(MIXED).items
       const numeric = Object.fromEntries(Object.entries(items).filter(([k]) => /^[1-9]\d*$/.test(k)))
       const v = verifyLoadedItems(numeric, { fileExists: true, hashes })
@@ -131,13 +148,70 @@ for (const bash of BASHES) {
     })
   })
 
-  test(`${tag} state-read.sh: summary は NOFILE / PARSE_ERROR / OK <件数> <高水位> <版>、range はキー順の範囲、keys は旧コマンドと同じ値`, () => {
+  test(`${tag} 新規のツリー: state.sh create が作った状態ファイルの state-verify.sh の出力は、ホストが高水位 0・版 2 に分解する（Issue #23 の再現）`, () => {
+    withWork((work) => {
+      const rel = '_/issue-trees/23.json'
+      assert.equal(run(bash, 'state.sh', ['--file', rel, 'create', '--base', 'main', '--parallel', '3', '--version', '2'], { cwd: work }).stdout, OK)
+      const r = run(bash, 'state-verify.sh', [rel], { cwd: work })
+      assert.equal(r.status, 0, r.stderr)
+      assert.equal(r.stdout, 'KEYS 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 0\nHIGHWATER bytes=0 version=2\n')
+      assert.deepEqual(parseStateVerifyHeader(r.stdout), {
+        fileExists: true,
+        keysSha256: '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+        keysCount: 0,
+        highWaterBytes: 0,
+        highWaterVersion: 2,
+      })
+      // ファイルなしは NOFILE の 1 行で、ホストは fileExists: false に分解する
+      const none = run(bash, 'state-verify.sh', ['_/issue-trees/24.json'], { cwd: work })
+      assert.equal(parseStateVerifyHeader(none.stdout).fileExists, false)
+    })
+  })
+
+  test(`${tag} 新規のツリー: state-read.sh summary（NOFILE）・state.sh create（STATE_RESULT ok）・作成後の summary の出力をそのまま返すと、ホストが版 2 に分解する`, () => {
+    withWork((work) => {
+      const rel = '_/issue-trees/23.json'
+      const before = run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout
+      const created = run(bash, 'state.sh', ['--file', rel, 'create', '--base', 'main', '--parallel', '3', '--version', '2'], { cwd: work }).stdout
+      assert.deepEqual(parseStateLoadSummary(before, created, false), { ok: true, fileExisted: false, count: 0, highWaterBytes: 0, highWaterVersion: 2 })
+      // 既にある（already-exists）など ok: false の結果の行は初期化の失敗に分解する
+      const again = run(bash, 'state.sh', ['--file', rel, 'create', '--base', 'main', '--parallel', '3', '--version', '2'], { cwd: work }).stdout
+      assert.equal(again, ng('already-exists'))
+      assert.deepEqual(parseStateLoadSummary(before, again, false), { ok: false, fileExisted: false, count: 0, highWaterBytes: 0, highWaterVersion: 0 })
+      const after = run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout
+      assert.equal(after, 'OK count=0 bytes=0 version=2\n')
+      assert.deepEqual(parseStateLoadSummary(after, '', false), { ok: true, fileExisted: true, count: 0, highWaterBytes: 0, highWaterVersion: 2 })
+    })
+  })
+
+  test(`${tag} state-read.sh summary: 高水位・版が整数でない状態ファイル（1.5・"abc"）の行は、ホストが分解せず値の破損と判定する`, () => {
+    withWork((work) => {
+      const cases = [
+        [{ perWorktreeByteReserveHighWater: 1.5, perWorktreeByteReserveHighWaterVersion: 2 }, 'OK count=0 bytes=1.5 version=2\n'],
+        [{ perWorktreeByteReserveHighWater: 'abc', perWorktreeByteReserveHighWaterVersion: 2 }, 'OK count=0 bytes=abc version=2\n'],
+        [{ perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: 'abc' }, 'OK count=0 bytes=0 version=abc\n'],
+      ]
+      for (const [i, [fields, want]] of cases.entries()) {
+        const rel = seed(work, JSON.stringify({ parent: 30 + i, ...fields, items: {} }), 30 + i)
+        const out = run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout
+        assert.equal(out, want)
+        assert.equal(parseStateLoadSummary(out, '', false), null, out)
+        assert.equal(isStateLoadValueMalformed(out), true, out)
+      }
+      // 整数の行は破損と判定しない
+      const ok = run(bash, 'state-read.sh', ['summary', seed(work, MIXED)], { cwd: work }).stdout
+      assert.equal(isStateLoadValueMalformed(ok), false)
+    })
+  })
+
+  test(`${tag} state-read.sh: summary は NOFILE / PARSE_ERROR / OK count=<件数> bytes=<高水位> version=<版>、range はキー順の範囲、keys は旧コマンドと同じ値`, () => {
     withWork((work) => {
       assert.equal(run(bash, 'state-read.sh', ['summary', '_/issue-trees/1.json'], { cwd: work }).stdout, 'NOFILE\n')
       const bad = seed(work, '{ not json', 2)
       assert.equal(run(bash, 'state-read.sh', ['summary', bad], { cwd: work }).stdout, 'PARSE_ERROR\n')
       const rel = seed(work, MIXED)
-      assert.equal(run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout, 'OK 5 5489787 2\n')
+      // 旧形式 OK <件数> <高水位> <版> をラベル付きにした（読込エージェントに位置で数値を分解させないため。Issue #23 と同じ方式）
+      assert.equal(run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout, 'OK count=5 bytes=5489787 version=2\n')
       const keysOrder = Object.keys(JSON.parse(spawnSync('jq', ['-c', '.items', join(work, rel)], { encoding: 'utf8' }).stdout)).sort()
       const r = JSON.parse(run(bash, 'state-read.sh', ['range', rel, '2', '3'], { cwd: work }).stdout)
       assert.deepEqual(Object.keys(r).sort(), keysOrder.slice(1, 3).sort())

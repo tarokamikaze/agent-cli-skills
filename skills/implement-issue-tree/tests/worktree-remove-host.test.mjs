@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { importDefinitions, runScript, BASE_ARGS, source, stateLoadOut, stateVerifyOut } from './lib/stub-run.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(
@@ -279,8 +279,8 @@ function recoverRun({ decision, wipCommitted, cleanup, branch = 'feat/2-x', args
   return runScript({
     args: { ...BASE_ARGS, ...argsExtra },
     override: (label, opts, prompt) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: ITEM }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: ITEM }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'recover:#2') return { decision, branch, wipCommitted, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
       if (label === 'state:cleanup:#2') return cleanup
       return undefined
@@ -388,8 +388,8 @@ test('Recover continue / discard: 掃除が保持し、failed の書き戻しも
     const { calls, result } = await runScript({
       args: BASE_ARGS,
       override: (label, opts, prompt) => {
-        if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: ITEM }, highWaterBytes: 0, highWaterVersion: 0 }
-        if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+        if (label === 'state:load') return stateLoadOut('', { 2: ITEM }, 0)
+        if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
         if (label === 'recover:#2') return { decision, branch: 'feat/2-x', wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
         if (label === 'state:cleanup:#2') return { ok: false, retained: true }
         // Recover の掃除より後の状態書き込み（failed の書き戻し）をすべて失敗させる
@@ -424,8 +424,8 @@ function absentRun({ absent, recover = {}, saved = BLOCKED, cleanup = { ok: true
   return runScript({
     args: BASE_ARGS,
     override: (label, opts, prompt) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: saved }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes: h, keysSha256: bKeysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: saved }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(h, bKeysSha, 1)
       if (label === 'recover:#2') return { decision: 'discard', branch: '', wipCommitted: false, worktreeMissing: true, reason: 'test', ...recover }
       if (label === 'worktree:absent:#2') { if (absent instanceof Error) throw absent; return absent }
       if (label === 'state:cleanup:#2') { if (cleanup instanceof Error) throw cleanup; return cleanup }

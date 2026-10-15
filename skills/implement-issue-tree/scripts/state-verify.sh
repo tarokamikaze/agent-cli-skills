@@ -5,16 +5,20 @@
 #   bash state-verify.sh <状態ファイル> [<開始行> <終了行>]
 #
 # 旧プロンプトがエージェントに 1 行で実行させていたシェル（関数定義・$(...) の入れ子・jq の式と引用符が同居し、
-# Claude Code の権限確認がランのたびに出た）を、そのままスクリプトへ移したもの。出力の形式は旧コマンドと
-# バイト単位で同じで、ホストの照合（keysSha256・keysCount・高水位・項目ごとの hashes）は変えていない
-# （tests/state-scripts.test.mjs が旧コマンドとの一致を検証する）。
+# Claude Code の権限確認がランのたびに出た）を、そのままスクリプトへ移したもの。出力の形式は 2 行目を除いて
+# 旧コマンドとバイト単位で同じ（tests/state-scripts.test.mjs が旧コマンドとの一致を検証する）。
+# 2 行目は旧コマンドの [<高水位>,<版>] をラベル付きにした。エージェントに位置で数値を分解させていたため、
+# 小さいモデルが [0,2] を 0・0 と取り違えて照合不成立で止まった（Issue #23）。今はエージェントが KEYS 行と
+# この行を加工せずに返し、ホストの parseStateVerifyHeader が分解・照合する。
 #
 # 出力（標準出力）:
 #   ファイルが無い: NOFILE の 1 行
 #   ファイルがある:
 #     1 行目  KEYS <sha256> <件数>   数値キー（正の整数の 10 進表記）を文字列昇順に並べた JSON 配列
 #                                   （jq -jc。末尾改行なし）の SHA-256 と、その件数
-#     2 行目  [<高水位>,<版>]         .perWorktreeByteReserveHighWater // 0 と .perWorktreeByteReserveHighWaterVersion // 0
+#     2 行目  HIGHWATER bytes=<高水位> version=<版>
+#                                   .perWorktreeByteReserveHighWater // 0 と .perWorktreeByteReserveHighWaterVersion // 0
+#                                   （整数でない値はそのまま出し、ホストが照合不成立にする）
 #     3 行目以降 <キー> <sha256>       数値キーごとに jq -jcS '.items[$k]' の SHA-256。<開始行> <終了行> を渡すと
 #                                   キーの並びのその範囲（1 始まり・両端を含む）だけを出す（出力が切れたときの分割実行用）
 # 終了コード:
@@ -61,7 +65,7 @@ h() {
 if [ -f "${f}" ]; then
   K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'
   echo "KEYS $(jq -jc "${K}" "${f}" | h | cut -c1-64) $(jq "${K} | length" "${f}")"
-  jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "${f}"
+  jq -r '"HIGHWATER bytes=\(.perWorktreeByteReserveHighWater // 0) version=\(.perWorktreeByteReserveHighWaterVersion // 0)"' "${f}"
   jq -r "${K} | .[]" "${f}" | sed -n "${range}p" | while IFS= read -r k; do
     printf '%s %s\n' "${k}" "$(jq -jcS --arg k "${k}" '.items[$k]' "${f}" | h | cut -c1-64)"
   done

@@ -7,7 +7,7 @@
 // 状態ファイルへ違反 branch を書かない（再実行が savedBranchMismatch で詰まらないように）。worktree は台帳に載せ、自動削除しない。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { importDefinitions, runScript, BASE_ARGS, source, stateLoadOut, stateVerifyOut } from './lib/stub-run.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(['implBranchViolation', 'implBranchViolationKind', 'sha256Hex', 'canonicalJson'], 'impl-branch-guard')
@@ -98,8 +98,8 @@ const recoverRun = (implBranch, extra = {}) => {
   return runScript({
     args: BASE_ARGS,
     override: (label) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: item }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'recover:#2') return { decision: 'continue', branch: 'feat/2-x', wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
       if (label === 'state:cleanup:#2') return { ok: true, retained: false }
       if (label === 'impl:#2') return { branch: implBranch, summary: 's', worktreePath: '/repo/wt/2' }
@@ -154,8 +154,8 @@ const normalRun = (saved) => {
   return runScript({
     args: BASE_ARGS,
     override: (label) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: item }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'recover:#2') return { decision: 'discard', branch: 'feat/2-x', wipCommitted: true, worktreeMissing: false, reason: 'test' }
       if (label === 'state:cleanup:#2') return { ok: true, retained: false }
       if (label === 'impl:#2') return { branch: violating(2), summary: 's', worktreePath: '/repo/wt/2' }
@@ -192,8 +192,8 @@ const nonconformingRun = (decision, extra = {}) => {
   return runScript({
     args: BASE_ARGS,
     override: (label) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: item }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'recover:#2') return { decision, branch: violating(2), wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' }, ...extra.recover }
       if (label === 'state:cleanup:#2') return extra.cleanup ?? { ok: true, retained: false }
       if (label === 'impl:#2') return { branch: 'feat/2-x', summary: 's', worktreePath: '/repo/wt/2' }
@@ -275,8 +275,8 @@ test('Recover continue が規約外 branch を解決: 3 イシュー連続でも
     args: BASE_ARGS,
     leaves: [2, 3, 4, 5],
     override: (label) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 3, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', items, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 3)
       const n = Number(/#(\d+)/.exec(label)?.[1])
       if (label.startsWith('recover:#')) return { decision: 'continue', branch: violating(n), wipCommitted: true, worktreeMissing: false, reason: 'test', brief: { done: 'd', remaining: 'r', broken: '' } }
       return undefined
@@ -332,8 +332,8 @@ const goneRun = (saved, recover) => {
   return runScript({
     args: BASE_ARGS,
     override: (label) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: item }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'recover:#2') return { ...goneRecover, ...recover }
       if (label === 'state:cleanup:#2') return { ok: true, retained: false }
       if (label === 'impl:#2') return { branch: 'feat/2-x', summary: 's', worktreePath: '/repo/wt/2' }

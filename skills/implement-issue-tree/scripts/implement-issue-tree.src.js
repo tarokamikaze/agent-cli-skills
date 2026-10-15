@@ -2850,33 +2850,25 @@ const RECOVER_SCHEMA = {
   },
 }
 
-// 状態ファイルの読み込みスキーマ（additionalProperties 許可で柔軟に受け取る）
+// 状態ファイルの読み込みスキーマ（additionalProperties 許可で柔軟に受け取る）。成否・ファイルの有無・
+// 高水位（Issue #471）・版（Issue #496）はエージェントに数値で返させず、出力の行をそのまま返させて
+// ホストの parseStateLoadSummary が分解する（Issue #23 と同じく、位置での転記の取り違えを防ぐ）。
 const STATE_LOAD_SCHEMA = {
   type: 'object',
-  required: ['ok', 'fileExisted', 'items', 'highWaterBytes', 'highWaterVersion'],
+  required: ['summaryLine', 'createLine', 'items'],
   properties: {
-    ok: { type: 'boolean', description: '読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false' },
-    fileExisted: { type: 'boolean', description: 'ファイルが存在した場合 true（新規作成した場合は false）' },
+    summaryLine: {
+      type: 'string',
+      description: 'state-read.sh summary の出力行をそのまま（NOFILE / PARSE_ERROR / OK count=<n> bytes=<n> version=<n>）',
+    },
+    createLine: {
+      type: 'string',
+      description: 'NOFILE で state.sh create を実行した場合はその標準出力（STATE_RESULT の行）をそのまま。実行しなかった場合は空文字',
+    },
     items: {
       type: 'object',
       description: 'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
       additionalProperties: true,
-    },
-    highWaterBytes: {
-      type: 'integer',
-      minimum: 0,
-      description:
-        '状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。' +
-        'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
-    },
-    highWaterVersion: {
-      type: 'integer',
-      minimum: 0,
-      description:
-        '状態ファイルのトップレベル .perWorktreeByteReserveHighWaterVersion の値。' +
-        'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #496。0 は' +
-        'ネスト二重計上を含み得た旧形式を示す番兵値で、現行版 HIGH_WATER_SCHEMA_VERSION と' +
-        '一致しない限り高水位は無効として扱われる）。',
     },
   },
   additionalProperties: true,
@@ -3040,9 +3032,12 @@ async function agentRetryOnce(prompt, opts, retrySuffix = '', rewritePrompt = (p
   return second
 }
 
+// last: 全モデルで isValid を満たせなかったときの、最後のモデルの応答（未返却・例外なら null）。呼び出し側が停止の案内を
+// 分けるためだけに使い、値を採用しない（loadState が状態ファイルの値の破損と転記の誤りを区別する。監査の P2）。
 async function runStateAgent(prompt, { label, schema, isValid }) {
   const promptWithDirective = `${prompt}\n${STATE_RETURN_DIRECTIVE}`
   let attempts = 0
+  let last = null
   for (const model of STATE_AGENT_MODEL_CHAIN) {
     attempts++
     const isPrimary = model === STATE_AGENT_MODEL_CHAIN[0]
@@ -3055,30 +3050,64 @@ async function runStateAgent(prompt, { label, schema, isValid }) {
       result = null
     }
     if (isValid(result)) return { result, outputMissing: false, attempts }
+    last = result
     const isLast = model === STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length - 1]
     if (!isLast) {
       log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
     }
   }
-  return { result: null, outputMissing: true, attempts }
+  return { result: null, outputMissing: true, attempts, last }
 }
 
-// state:load の isValid（Issue #493 codex 指摘）。`ok` が boolean であること単独では
-// STATE_LOAD_SCHEMA の必須フィールド（fileExisted / items / highWaterBytes / highWaterVersion）
-// 欠落を検出できず、`{ ok: true }` のようなスキーマ不適合応答を成功として受理してしまう。
-// 受理すると loadState の `items: result?.items ?? {}` が既存の全 item を未記録扱いにし、
-// 重複実装・重複 PR 作成につながるため、必須フィールドの型を全て検証してから受理する。
-function isValidStateLoadResult(r) {
+// state:load が返した行（summaryLine・createLine）をホストが分解する純粋関数（Issue #23 と同じ方式。
+// 以前は「OK <件数> <高水位> <版>」をエージェントに位置で転記させており、取り違えると照合不成立で止まった）。
+// summaryLine は state-read.sh summary の 1 行（NOFILE / PARSE_ERROR / OK count=<n> bytes=<n> version=<n>）、
+// createLine は NOFILE のときに実行した state.sh create の標準出力（成功なら STATE_RESULT {"ok":true}）。各行の前後の空白・
+// CRLF・空行は許す。返り値は { ok, fileExisted, count, highWaterBytes, highWaterVersion }。
+// - NOFILE: readOnly（dryRun）は作らないので createLine は空でなければならない。それ以外は createLine が
+//   STATE_RESULT {"ok":true} の 1 行なら新規作成の成功（版は HIGH_WATER_SCHEMA_VERSION・高水位 0）、
+//   STATE_RESULT {"ok":false,"reason":"<固定語彙>"} の 1 行なら初期化の失敗（ok: false）。createLine が空・
+//   STATE_RESULT の形でない行は null（形が合わない）: create を実行しても出力の転記を忘れた応答を「初期化に失敗した」と
+//   誤って案内しないため、sonnet で取り直させる（監査の P2）
+// - ファイルがある（PARSE_ERROR / OK …）のに createLine がある、ラベル違い・数値でない値・先頭のゼロ・
+//   余分な行・欠けた行は null（形が合わない。isValid が不正としてフォールバックへ回し、それでも不正なら停止）
+function parseStateLoadSummary(summaryLine, createLine, readOnly) {
+  const lines = (t) => (typeof t === 'string' ? t.split('\n').map((l) => l.trim()).filter(Boolean) : null)
+  const s = lines(summaryLine)
+  const c = lines(createLine)
+  if (!s || !c || s.length !== 1) return null
+  const base = { ok: false, fileExisted: true, count: 0, highWaterBytes: 0, highWaterVersion: 0 }
+  if (s[0] === 'NOFILE') {
+    if (readOnly) return c.length ? null : { ...base, ok: true, fileExisted: false }
+    if (c.length !== 1) return null
+    if (/^STATE_RESULT[ \t]+\{"ok":true\}$/.test(c[0])) return { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION }
+    return /^STATE_RESULT[ \t]+\{"ok":false,"reason":"[a-z][a-z-]{0,39}"\}$/.test(c[0]) ? { ...base, fileExisted: false } : null
+  }
+  if (c.length) return null
+  if (s[0] === 'PARSE_ERROR') return base
+  const n = '(0|[1-9]\\d{0,14})'
+  const m = new RegExp(`^OK[ \\t]+count=${n}[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(s[0])
+  return m ? { ...base, ok: true, count: Number(m[1]), highWaterBytes: Number(m[2]), highWaterVersion: Number(m[3]) } : null
+}
+
+// summaryLine が OK count=… bytes=… version=… のラベルの形をした 1 行で、値だけが整数でない（1.5・abc・空・先頭のゼロ）か
+// （監査の P2）。state-read.sh は状態ファイルの値を加工せずに出すため、最後のモデルまでこの形の行を返したなら、転記の誤りでは
+// なく状態ファイルの値の破損と見なす（再実行しても同じ所で止まる）。ラベル違い・余分な行は転記の誤りとして扱う（false）。
+function isStateLoadValueMalformed(summaryLine) {
+  if (typeof summaryLine !== 'string') return false
+  const s = summaryLine.split('\n').map((l) => l.trim()).filter(Boolean)
+  return s.length === 1 && /^OK[ \t]+count=.*[ \t]+bytes=.*[ \t]+version=.*$/.test(s[0]) && parseStateLoadSummary(s[0], '', false) === null
+}
+
+// state:load の isValid（Issue #493 codex 指摘）。必須フィールドの欠落した応答を成功として受理すると
+// loadState の items が既存の全 item を未記録扱いにし、重複実装・重複 PR 作成につながるため、
+// items の型と、summaryLine・createLine がホストで分解できる形であることを検証してから受理する。
+function isValidStateLoadResult(r, readOnly) {
   return (
-    typeof r?.ok === 'boolean' &&
-    typeof r?.fileExisted === 'boolean' &&
     r?.items !== null &&
     typeof r?.items === 'object' &&
     !Array.isArray(r.items) &&
-    Number.isInteger(r?.highWaterBytes) &&
-    r.highWaterBytes >= 0 &&
-    Number.isInteger(r?.highWaterVersion) &&
-    r.highWaterVersion >= 0
+    parseStateLoadSummary(r.summaryLine, r.createLine, readOnly) !== null
   )
 }
 
@@ -3164,7 +3193,6 @@ function canonicalJson(v) {
 // 等の特殊キーで採用先オブジェクトを汚染しないため）。verified は「全項目が一致し、かつ検証が
 // 成立した」場合のみ true（ラン末尾の worktree 削除判定はこれが true のときだけ行う）。
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
-const isNonNegInt = (x) => Number.isInteger(x) && x >= 0
 
 function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes ? check.hashes : null
@@ -3190,18 +3218,39 @@ function verifyLoadedItems(items, check) {
   return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
-// state:load-verify の isValid（Bugbot 指摘）。fileExists だけの応答（例 { fileExists: true }）を
-// 受理すると sonnet へのフォールバックが走らず全項目不採用に落ちるため、state:load と同じく必須
-// フィールドの型をすべて検証する。hashes の値も 64 桁小文字 16 進のみ受理する（不正な応答は
-// フォールバックへ回し、それでも不成立なら呼び出し側が状態なしとして扱う）。
+// state-verify.sh の先頭の行（検証エージェントが加工せずに写した headerLines）をホストが分解する純粋関数
+// （Issue #23）。以前はエージェントに「2 行目の [<高水位>,<版>] を highWaterBytes・highWaterVersion へ」と
+// 位置で分解させており、haiku が [0,2] を 0・0 と取り違えて新規ツリーの初回ランが照合不成立で止まった。
+// 受理するのは「NOFILE」の 1 行か、「KEYS <64 桁 hex> <件数>」と「HIGHWATER bytes=<整数> version=<整数>」の
+// ちょうど 2 行だけ。各行の前後の空白・CRLF・空行・2 行の順序の揺れは許し、それ以外（ラベル違い・
+// 数値でない・先頭のゼロ・余分な行・欠けた行）は null（照合不成立。fail-closed）にする。
+function parseStateVerifyHeader(text) {
+  if (typeof text !== 'string') return null
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
+  if (lines.length === 1 && lines[0] === 'NOFILE') {
+    return { fileExists: false, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
+  }
+  const n = '(0|[1-9]\\d{0,14})'
+  const k = lines.map((l) => new RegExp(`^KEYS[ \\t]+([0-9a-f]{64})[ \\t]+${n}$`).exec(l))
+  const w = lines.map((l) => new RegExp(`^HIGHWATER[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(l))
+  const ki = k.findIndex(Boolean)
+  const wi = w.findIndex(Boolean)
+  if (lines.length !== 2 || ki < 0 || wi < 0 || ki === wi) return null
+  return { fileExists: true, keysSha256: k[ki][1], keysCount: Number(k[ki][2]), highWaterBytes: Number(w[wi][1]), highWaterVersion: Number(w[wi][2]) }
+}
+
+// state:load-verify の isValid（Bugbot 指摘）。不完全な応答を受理すると sonnet へのフォールバックが走らず
+// 全項目不採用に落ちるため、必須フィールドをすべて検証する。headerLines はホストが分解できる形に限り、
+// hashes の値も 64 桁小文字 16 進のみ受理する（不正な応答はフォールバックへ回し、それでも不成立なら
+// 呼び出し側が照合不成立として停止する）。
 function isValidStateVerifyResult(r) {
   const h = r?.hashes
+  const head = parseStateVerifyHeader(r?.headerLines)
   return (
-    typeof r?.fileExists === 'boolean' &&
+    head !== null &&
     h !== null && typeof h === 'object' && !Array.isArray(h) &&
     Object.values(h).every((x) => /^[0-9a-f]{64}$/.test(x)) &&
-    (r.fileExists ? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '' && r.keysCount === 0) &&
-    isNonNegInt(r.keysCount) && isNonNegInt(r.highWaterBytes) && isNonNegInt(r.highWaterVersion)
+    (head.fileExists || Object.keys(h).length === 0)
   )
 }
 
@@ -3214,14 +3263,10 @@ const isValidStateFillResult = (r) => r?.items !== null && typeof r?.items === '
 
 const STATE_VERIFY_SCHEMA = {
   type: 'object',
-  required: ['fileExists', 'hashes', 'keysSha256', 'keysCount', 'highWaterBytes', 'highWaterVersion'],
+  required: ['headerLines', 'hashes'],
   properties: {
-    fileExists: { type: 'boolean' },
+    headerLines: { type: 'string' },
     hashes: { type: 'object', additionalProperties: { type: 'string' } },
-    keysSha256: { type: 'string' },
-    keysCount: { type: 'integer', minimum: 0 },
-    highWaterBytes: { type: 'integer', minimum: 0 },
-    highWaterVersion: { type: 'integer', minimum: 0 },
   },
 }
 
@@ -3236,40 +3281,50 @@ async function loadState() {
   // のため、フォールバックのリトライで状態を壊す心配はない（Issue #493 2.3 節）。
   // dryRun（Issue #585）はファイルが無くても作らず、無い状態（items: {}）として返す。
   const readOnly = dryRunEnabled
-  const { result, outputMissing } = await runStateAgent(
+  // 出力の行は加工せずに返させ、成否・ファイルの有無・高水位・版はホスト（parseStateLoadSummary）が分解する
+  // （Issue #23 と同じ方式。位置で数値を分解させると小さいモデルが取り違える）。
+  const { result: loadRaw, outputMissing, last: loadLast } = await runStateAgent(
     [
       `状態ファイル読み込みタスク。`,
       TEMP_FILE_POLICY,
       STATE_SCRIPT_ONLY,
       `【手順】`,
-      `1. 次を実行する: ${scriptCommand('state-read.sh', ` summary ${STATE_FILE}`)}`,
-      `2. 出力が「OK <件数> <高水位> <版>」の場合: ok: true, fileExisted: true, highWaterBytes: <高水位>, highWaterVersion: <版>。` +
-        `items は 5 件ずつ分けて読む: 次のコマンドの <開始> に 1, 6, 11, …（<件数> まで）、<終了> に <開始>+4 を入れて実行し、` +
+      `1. 次を実行し、出力の行を 1 文字も変えずにそのまま summaryLine へ写す（数値を取り出したり、書き換えたりしない。分解はホストが行う）: ${scriptCommand('state-read.sh', ` summary ${STATE_FILE}`)}`,
+      `2. 出力が OK で始まる場合: createLine は ""。` +
+        `items は 5 件ずつ分けて読む: 出力の count= の値を <件数> として、次のコマンドの <開始> に 1, 6, 11, …（<件数> まで）、<終了> に <開始>+4 を入れて実行し、` +
         `出力の JSON オブジェクトを合わせて items として返す: ${scriptCommand('state-read.sh', ` range ${STATE_FILE}`)} <開始> <終了>` +
         `。読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。`,
-      `3. 出力が PARSE_ERROR の場合: ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`,
+      `3. 出力が PARSE_ERROR の場合: createLine: ""・items: {} を返す。`,
       readOnly
-        ? `4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。` +
-          `ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
-        : `4. 出力が NOFILE の場合: 次を実行して初期ファイルを作る: ` +
+        ? `4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。createLine: ""・items: {} を返す。`
+        : `4. 出力が NOFILE の場合: 次を実行して初期ファイルを作り、その標準出力（STATE_RESULT で始まる行）を 1 文字も変えずにそのまま createLine へ写す` +
+          `（ok を読み取ったり、書き換えたりしない。成否の判定はホストが行う）。items: {} を返す: ` +
           // 読み込みの手順（state-read.sh）と同じく、組み立てで例外にしない scriptCommand を使う（skillDir の必須は駆動部冒頭が検査する）
-          `${scriptCommand('state.sh', ` --file ${STATE_FILE} create --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}` +
-          `。標準出力の最後の行が STATE_RESULT で ok が true なら ok: true, fileExisted: false, items: {}, highWaterBytes: 0,` +
-          ` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION}。それ以外は ok: false, fileExisted: false, items: {},` +
-          ` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
-      `返却: ok, fileExisted（boolean）, items（JSON オブジェクト）, highWaterBytes・highWaterVersion（整数。欠落は 0）。`,
+          `${scriptCommand('state.sh', ` --file ${STATE_FILE} create --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}`,
+      `返却: summaryLine（文字列）, createLine（文字列）, items（JSON オブジェクト）。`,
     ].join('\n'),
-    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: isValidStateLoadResult },
+    { label: 'state:load', schema: STATE_LOAD_SCHEMA, isValid: (r) => isValidStateLoadResult(r, readOnly) },
   )
+  const result = loadRaw && { ...parseStateLoadSummary(loadRaw.summaryLine, loadRaw.createLine, readOnly), items: loadRaw.items }
   // 読み込み・初期化のいずれが失敗しても停止する
   // （壊れた・未永続化の状態で続行すると重複 PR・重複実装が発生する危険がある）。
-  // outputMissing（haiku / sonnet とも StructuredOutput 未返却）は「初期化に失敗した」という
-  // 誤った文言を避け、専用の再実行案内にする（Issue #493。result?.fileExisted は常に
-  // undefined のためこの分岐を独立させないと誤って初期化失敗メッセージに落ちる）。
+  // outputMissing（haiku / sonnet とも StructuredOutput 未返却、または返した行の形が合わない）は
+  // 「初期化に失敗した」という誤った文言を避け、専用の再実行案内にする（Issue #493。result は
+  // null のためこの分岐を独立させないと誤って初期化失敗メッセージに落ちる）。
   if (outputMissing) {
+    // 行の形（ラベル）は合っていて値だけが整数でないなら、転記の誤りではなく状態ファイルの値の破損と見なす（監査の P2）。
+    // 「そのまま再実行」と案内すると同じ所で止まり続けるため、破損の可能性と退避の手順を案内する。値はログに出さない
+    // （状態ファイルの中身は非信頼のデータ）
+    if (isStateLoadValueMalformed(loadLast?.summaryLine)) {
+      throw new Error(
+        `状態ファイル（${STATE_FILE}）の件数・高水位・版のいずれかが整数でない。ファイルが壊れている可能性があり、再実行では直らない。` +
+        `退避（mv ${STATE_FILE} ${STATE_FILE}.aside）してから内容を確認し、修復するか削除して再実行すること` +
+        `（references/recovery.md の「状態ファイルが壊れている場合」）。`,
+      )
+    }
     throw new Error(
       `状態ファイル（${STATE_FILE}）読み込みエージェントが haiku / sonnet いずれも` +
-      `StructuredOutput を返さなかった。ファイル自体の破損ではないため、そのまま再実行すること。`,
+      `StructuredOutput を返さなかった（または返した行の形が合わなかった）。ファイル自体の破損ではないため、そのまま再実行すること。`,
     )
   }
   if (!result?.ok) {
@@ -3288,16 +3343,19 @@ async function loadState() {
   }
   // 内容照合（上の「状態ファイル読込の内容照合」節参照）。検証エージェントには読込結果を渡さない
   // （独立観測を崩さないため）。未返却（outputMissing）は全項目不採用＝状態なしに倒す。
-  const { result: check } = await runStateAgent(
+  // 検証エージェントには出力の先頭の行を加工せずに返させ、数値の分解はホスト（parseStateVerifyHeader）が
+  // 行う（Issue #23。位置で分解させると小さいモデルが取り違える）。
+  const { result: verifyRaw } = await runStateAgent(
     [
       TEMP_FILE_POLICY,
       STATE_SCRIPT_ONLY,
       `状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら、同じコマンドの末尾に行範囲を足して〔例: 1 20〕分割実行し全件を取得する）:`,
       scriptCommand('state-verify.sh', ` ${STATE_FILE}`),
-      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
+      `返却: NOFILE なら headerLines: "NOFILE"・hashes: {}。それ以外は headerLines へ、出力の KEYS で始まる行と HIGHWATER で始まる行を 1 文字も変えずにそのまま写す（2 行を改行でつなぐ。数値を取り出したり、並べ替えたり、計算し直したり、返すキー一覧から作ったりしない。分解と照合はホストが行う）。3 行目以降の「キー ハッシュ」行を hashes（キー → ハッシュ）。`,
     ].join('\n'),
     { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
+  const check = verifyRaw && { ...parseStateVerifyHeader(verifyRaw.headerLines), hashes: verifyRaw.hashes }
   // 照合自体が成立しない（検証エージェントが haiku / sonnet とも不成立、または読込側が既存と
   // 申告したファイルを検証側が見つけられない）場合は停止する（Codex P1）。全項目を状態なしにして
   // 続行すると、既存の monitoring 状態・PR 番号を失ったまま再実装・PR 作成へ進み得るため。

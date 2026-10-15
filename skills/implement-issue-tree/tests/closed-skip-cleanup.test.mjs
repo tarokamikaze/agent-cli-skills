@@ -11,7 +11,7 @@
 //       3. 実装スクリプト全体（tests/lib/stub-run.mjs）でのホスト結合。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { importDefinitions, runScript, BASE_ARGS } from './lib/stub-run.mjs'
+import { importDefinitions, runScript, BASE_ARGS, stateLoadOut, stateVerifyOut } from './lib/stub-run.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const SHA = 'c'.repeat(40)
@@ -291,8 +291,8 @@ function run({ saved = savedOf(), hashOk = true, bind = bindOk, cleanup = { ok: 
       const x = extra(label, opts, prompt)
       if (x !== undefined) return x
       if (label === 'plan:issue-tree') return tree(true)
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: item }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'pr-bind:#2') return bind
       if (label === 'state:cleanup:#2') return cleanup
       return undefined
@@ -400,8 +400,8 @@ test('結合: 1 ランの後始末は上限 10 件で、超えた分は見送っ
     leaves: numbers,
     override: (label, _opts, prompt) => {
       if (label === 'plan:issue-tree') return { nodes: [{ number: 1, title: 'root', state: 'open', parent: 0, siblingIndex: 0, dependsOn: [], subIssuesTotal: 12 }, ...numbers.map((n, i) => ({ number: n, title: `issue ${n}`, state: 'closed', parent: 1, siblingIndex: i, dependsOn: [], subIssuesTotal: 0 }))] }
-      if (label === 'state:load') return { ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: numbers.length, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', items, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, numbers.length)
       const mm = /^pr-bind:#(\d+)$/.exec(label)
       if (mm) return { ...bindOk, headRefName: `feat/${mm[1]}-x`, closingIssues: [Number(mm[1])] }
       if (label.startsWith('state:cleanup:')) return { ok: false, retained: true, worktree: 'retained-dirty' }
@@ -453,8 +453,8 @@ function runMany(items, { cleanup = { ok: true, retained: false } } = {}) {
     leaves: numbers,
     override: (label, _opts, _prompt) => {
       if (label === 'plan:issue-tree') return { nodes }
-      if (label === 'state:load') return { ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: numbers.length, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', items, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, numbers.length)
       const b = /^pr-bind:#(\d+)$/.exec(label)
       if (b) {
         const n = Number(b[1])
@@ -520,8 +520,8 @@ test('結合: 試行回数の書き込みに失敗・例外でも後始末は壊
     leaves: numbers,
     override: (label) => {
       if (label === 'plan:issue-tree') return { nodes }
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: items0, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: numbers.length, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', items0, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, numbers.length)
       const b = /^pr-bind:#(\d+)$/.exec(label)
       if (b) return { state: 'OPEN', headRefOid: SHA, headRefName: `feat/${b[1]}-x`, baseRefName: 'main', isCrossRepository: false, closingIssues: [Number(b[1])] }
       if (/^state:update:#/.test(label)) throw new Error('boom')
@@ -546,8 +546,8 @@ test('結合: 記録される結果（retained-dirty = 試行済み）の候補�
     leaves: [2, 3],
     override: (label) => {
       if (label === 'plan:issue-tree') return { nodes }
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: items0, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 2, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', items0, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 2)
       const b = /^pr-bind:#(\d+)$/.exec(label)
       if (b) return { state: 'MERGED', headRefOid: SHA, headRefName: `feat/${b[1]}-x`, baseRefName: 'main', isCrossRepository: false, closingIssues: [Number(b[1])] }
       if (label === 'state:cleanup:#2') return { ok: false, retained: true, worktree: 'retained-dirty' }
@@ -602,8 +602,8 @@ async function runWithWriteFailure(failWhen, { bind, cleanup }) {
     leaves: [2, 3],
     override: (label, _o, prompt) => {
       if (label === 'plan:issue-tree') return { nodes }
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: items0, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 2, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', items0, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 2)
       const b = /^pr-bind:#(\d+)$/.exec(label)
       if (b) return { state: bind, headRefOid: SHA, headRefName: `feat/${b[1]}-x`, baseRefName: 'main', isCrossRepository: false, closingIssues: [Number(b[1])] }
       if (/^state:cleanup:#/.test(label)) return cleanup

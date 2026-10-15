@@ -12,7 +12,11 @@
 # 出力（標準出力）:
 #   summary  ファイルが無い: NOFILE
 #            JSON として読めない: PARSE_ERROR
-#            読めた: OK <items の全キー数> <高水位> <版>（高水位・版は無ければ 0）
+#            読めた: OK count=<items の全キー数> bytes=<高水位> version=<版>（高水位・版は無ければ 0。
+#                    整数でない値はそのまま出し、ホストが形の不一致として扱う）
+#            旧形式はラベルの無い OK <件数> <高水位> <版> で、読込エージェントに位置で数値を分解させていた。
+#            取り違えると照合不成立でランが止まるため（Issue #23 と同じ症状）、ラベルを付け、エージェントは
+#            この行を加工せずに返し、ホストの parseStateLoadSummary が分解する。
 #   range    .items のキー（jq の keys の並び＝文字列昇順）の <開始>〜<終了> 番目（1 始まり・両端を含む）の項目だけを
 #            持つ JSON オブジェクト 1 行（jq -c）。範囲外は {}
 #   keys     指定したキー（正の整数の 10 進表記だけ）の項目だけを持つ JSON オブジェクト 1 行（jq -c）。
@@ -54,7 +58,7 @@ case "${cmd}" in
       echo PARSE_ERROR
       exit 0
     fi
-    jq -r '"OK \(.items // {} | length) \(.perWorktreeByteReserveHighWater // 0) \(.perWorktreeByteReserveHighWaterVersion // 0)"' "${f}" || exit 1
+    jq -r '"OK count=\(.items // {} | length) bytes=\(.perWorktreeByteReserveHighWater // 0) version=\(.perWorktreeByteReserveHighWaterVersion // 0)"' "${f}" || exit 1
     ;;
   range)
     [ $# -eq 2 ] || usage

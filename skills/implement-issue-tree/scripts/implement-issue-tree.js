@@ -2851,32 +2851,24 @@ description:
 }
 
 
+
+
 const STATE_LOAD_SCHEMA={
 type:'object',
-required:['ok','fileExisted','items','highWaterBytes','highWaterVersion'],
+required:['summaryLine','createLine','items'],
 properties:{
-ok:{type:'boolean',description:'読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false'},
-fileExisted:{type:'boolean',description:'ファイルが存在した場合 true（新規作成した場合は false）'},
+summaryLine:{
+type:'string',
+description:'state-read.sh summary の出力行をそのまま（NOFILE / PARSE_ERROR / OK count=<n> bytes=<n> version=<n>）',
+},
+createLine:{
+type:'string',
+description:'NOFILE で state.sh create を実行した場合はその標準出力（STATE_RESULT の行）をそのまま。実行しなかった場合は空文字',
+},
 items:{
 type:'object',
 description:'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
 additionalProperties:true,
-},
-highWaterBytes:{
-type:'integer',
-minimum:0,
-description:
-'状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。'+
-'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
-},
-highWaterVersion:{
-type:'integer',
-minimum:0,
-description:
-'状態ファイルのトップレベル .perWorktreeByteReserveHighWaterVersion の値。'+
-'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #496。0 は'+
-'ネスト二重計上を含み得た旧形式を示す番兵値で、現行版 HIGH_WATER_SCHEMA_VERSION と'+
-'一致しない限り高水位は無効として扱われる）。',
 },
 },
 additionalProperties:true,
@@ -3040,9 +3032,12 @@ if(attemptRef)attemptRef.n=2
 return second
 }
 
+
+
 async function runStateAgent(prompt,{label,schema,isValid}){
 const promptWithDirective=`${prompt}\n${STATE_RETURN_DIRECTIVE}`
 let attempts=0
+let last=null
 for(const model of STATE_AGENT_MODEL_CHAIN){
 attempts++
 const isPrimary=model===STATE_AGENT_MODEL_CHAIN[0]
@@ -3055,12 +3050,13 @@ log(`⚠️ ${attemptLabel}: state 書込みエージェントが例外終了し
 result=null
 }
 if(isValid(result))return{result,outputMissing:false,attempts}
+last=result
 const isLast=model===STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length- 1]
 if(!isLast){
 log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
 }
 }
-return{result:null,outputMissing:true,attempts}
+return{result:null,outputMissing:true,attempts,last}
 }
 
 
@@ -3068,17 +3064,50 @@ return{result:null,outputMissing:true,attempts}
 
 
 
-function isValidStateLoadResult(r){
+
+
+
+
+
+
+
+function parseStateLoadSummary(summaryLine,createLine,readOnly){
+const lines=(t)=>(typeof t==='string'?t.split('\n').map((l)=>l.trim()).filter(Boolean):null)
+const s=lines(summaryLine)
+const c=lines(createLine)
+if(!s|| !c||s.length!==1)return null
+const base={ok:false,fileExisted:true,count:0,highWaterBytes:0,highWaterVersion:0}
+if(s[0]==='NOFILE'){
+if(readOnly)return c.length?null:{ ...base,ok:true,fileExisted:false}
+if(c.length!==1)return null
+if(/^STATE_RESULT[ \t]+\{"ok":true\}$/.test(c[0])) return { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION }
+return /^STATE_RESULT[ \t]+\{"ok":false,"reason":"[a-z][a-z-]{0,39}"\}$/.test(c[0]) ? { ...base, fileExisted: false } : null
+}
+if(c.length)return null
+if(s[0]==='PARSE_ERROR')return base
+const n='(0|[1-9]\\d{0,14})'
+const m=new RegExp(`^OK[ \\t]+count=${n}[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(s[0])
+return m?{ ...base,ok:true,count:Number(m[1]),highWaterBytes:Number(m[2]),highWaterVersion:Number(m[3])}:null
+}
+
+
+
+
+function isStateLoadValueMalformed(summaryLine){
+if(typeof summaryLine!=='string')return false
+const s=summaryLine.split('\n').map((l)=>l.trim()).filter(Boolean)
+return s.length===1&& /^OK[ \t]+count=.*[ \t]+bytes=.*[ \t]+version=.*$/.test(s[0]) && parseStateLoadSummary(s[0], '', false) === null
+}
+
+
+
+
+function isValidStateLoadResult(r,readOnly){
 return(
-typeof r?.ok==='boolean'&&
-typeof r?.fileExisted==='boolean'&&
 r?.items!==null&&
 typeof r?.items==='object'&&
 !Array.isArray(r.items)&&
-Number.isInteger(r?.highWaterBytes)&&
-r.highWaterBytes>=0&&
-Number.isInteger(r?.highWaterVersion)&&
-r.highWaterVersion>=0
+parseStateLoadSummary(r.summaryLine,r.createLine,readOnly)!==null
 )
 }
 
@@ -3164,7 +3193,6 @@ return enc(v).replace(/\x7f/g, '\\u007f')
 
 
 const hasOwn=(o,k)=>Object.prototype.hasOwnProperty.call(o,k)
-const isNonNegInt=(x)=>Number.isInteger(x)&&x>=0
 
 function verifyLoadedItems(items,check){
 const hashes=check?.fileExists===true&&check.hashes?check.hashes:null
@@ -3194,14 +3222,35 @@ return{adopted,dropped,unverified,verified:hashes!==null&&unverified.length===0&
 
 
 
+
+
+function parseStateVerifyHeader(text){
+if(typeof text!=='string')return null
+const lines=text.split('\n').map((l)=>l.trim()).filter(Boolean)
+if(lines.length===1&&lines[0]==='NOFILE'){
+return{fileExists:false,keysSha256:'',keysCount:0,highWaterBytes:0,highWaterVersion:0}
+}
+const n='(0|[1-9]\\d{0,14})'
+const k=lines.map((l)=>new RegExp(`^KEYS[ \\t]+([0-9a-f]{64})[ \\t]+${n}$`).exec(l))
+const w=lines.map((l)=>new RegExp(`^HIGHWATER[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(l))
+const ki=k.findIndex(Boolean)
+const wi=w.findIndex(Boolean)
+if(lines.length!==2||ki<0||wi<0||ki===wi)return null
+return{fileExists:true,keysSha256:k[ki][1],keysCount:Number(k[ki][2]),highWaterBytes:Number(w[wi][1]),highWaterVersion:Number(w[wi][2])}
+}
+
+
+
+
+
 function isValidStateVerifyResult(r){
 const h=r?.hashes
+const head=parseStateVerifyHeader(r?.headerLines)
 return(
-typeof r?.fileExists==='boolean'&&
+head!==null&&
 h!==null&&typeof h==='object'&& !Array.isArray(h)&&
 Object.values(h).every((x)=> /^[0-9a-f]{64}$/.test(x)) &&
-(r.fileExists? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '' && r.keysCount === 0) &&
-isNonNegInt(r.keysCount)&&isNonNegInt(r.highWaterBytes)&&isNonNegInt(r.highWaterVersion)
+(head.fileExists||Object.keys(h).length===0)
 )
 }
 
@@ -3214,14 +3263,10 @@ const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&& 
 
 const STATE_VERIFY_SCHEMA={
 type:'object',
-required:['fileExists','hashes','keysSha256','keysCount','highWaterBytes','highWaterVersion'],
+required:['headerLines','hashes'],
 properties:{
-fileExists:{type:'boolean'},
+headerLines:{type:'string'},
 hashes:{type:'object',additionalProperties:{type:'string'}},
-keysSha256:{type:'string'},
-keysCount:{type:'integer',minimum:0},
-highWaterBytes:{type:'integer',minimum:0},
-highWaterVersion:{type:'integer',minimum:0},
 },
 }
 
@@ -3236,40 +3281,50 @@ async function loadState(){
 
 
 const readOnly=dryRunEnabled
-const{result,outputMissing}=await runStateAgent(
+
+
+const{result:loadRaw,outputMissing,last:loadLast}=await runStateAgent(
 [
 `状態ファイル読み込みタスク。`,
 TEMP_FILE_POLICY,
 STATE_SCRIPT_ONLY,
 `【手順】`,
-`1. 次を実行する: ${scriptCommand('state-read.sh', ` summary ${STATE_FILE}`)}`,
-`2. 出力が「OK <件数> <高水位> <版>」の場合: ok: true, fileExisted: true, highWaterBytes: <高水位>, highWaterVersion: <版>。`+
-`items は 5 件ずつ分けて読む: 次のコマンドの <開始> に 1, 6, 11, …（<件数> まで）、<終了> に <開始>+4 を入れて実行し、`+
+`1. 次を実行し、出力の行を 1 文字も変えずにそのまま summaryLine へ写す（数値を取り出したり、書き換えたりしない。分解はホストが行う）: ${scriptCommand('state-read.sh', ` summary ${STATE_FILE}`)}`,
+`2. 出力が OK で始まる場合: createLine は ""。`+
+`items は 5 件ずつ分けて読む: 出力の count= の値を <件数> として、次のコマンドの <開始> に 1, 6, 11, …（<件数> まで）、<終了> に <開始>+4 を入れて実行し、`+
 `出力の JSON オブジェクトを合わせて items として返す: ${scriptCommand('state-read.sh', ` range ${STATE_FILE}`)} <開始> <終了>`+
 `。読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。`,
-`3. 出力が PARSE_ERROR の場合: ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`,
+`3. 出力が PARSE_ERROR の場合: createLine: ""・items: {} を返す。`,
 readOnly
-?`4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。`+
-`ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
-:`4. 出力が NOFILE の場合: 次を実行して初期ファイルを作る: `+
+?`4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。createLine: ""・items: {} を返す。`
+:`4. 出力が NOFILE の場合: 次を実行して初期ファイルを作り、その標準出力（STATE_RESULT で始まる行）を 1 文字も変えずにそのまま createLine へ写す`+
+`（ok を読み取ったり、書き換えたりしない。成否の判定はホストが行う）。items: {} を返す: `+
 
-`${scriptCommand('state.sh', ` --file ${STATE_FILE} create --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}`+
-`。標準出力の最後の行が STATE_RESULT で ok が true なら ok: true, fileExisted: false, items: {}, highWaterBytes: 0,`+
-` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION}。それ以外は ok: false, fileExisted: false, items: {},`+
-` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
-`返却: ok, fileExisted（boolean）, items（JSON オブジェクト）, highWaterBytes・highWaterVersion（整数。欠落は 0）。`,
+`${scriptCommand('state.sh', ` --file ${STATE_FILE} create --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}`,
+`返却: summaryLine（文字列）, createLine（文字列）, items（JSON オブジェクト）。`,
 ].join('\n'),
-{label:'state:load',schema:STATE_LOAD_SCHEMA,isValid:isValidStateLoadResult},
+{label:'state:load',schema:STATE_LOAD_SCHEMA,isValid:(r)=>isValidStateLoadResult(r,readOnly)},
 )
+const result=loadRaw&&{ ...parseStateLoadSummary(loadRaw.summaryLine,loadRaw.createLine,readOnly),items:loadRaw.items}
 
 
 
 
 
 if(outputMissing){
+
+
+
+if(isStateLoadValueMalformed(loadLast?.summaryLine)){
+throw new Error(
+`状態ファイル（${STATE_FILE}）の件数・高水位・版のいずれかが整数でない。ファイルが壊れている可能性があり、再実行では直らない。`+
+`退避（mv ${STATE_FILE} ${STATE_FILE}.aside）してから内容を確認し、修復するか削除して再実行すること`+
+`（references/recovery.md の「状態ファイルが壊れている場合」）。`,
+)
+}
 throw new Error(
 `状態ファイル（${STATE_FILE}）読み込みエージェントが haiku / sonnet いずれも`+
-`StructuredOutput を返さなかった。ファイル自体の破損ではないため、そのまま再実行すること。`,
+`StructuredOutput を返さなかった（または返した行の形が合わなかった）。ファイル自体の破損ではないため、そのまま再実行すること。`,
 )
 }
 if(!result?.ok){
@@ -3288,16 +3343,19 @@ throw new Error(
 }
 
 
-const{result:check}=await runStateAgent(
+
+
+const{result:verifyRaw}=await runStateAgent(
 [
 TEMP_FILE_POLICY,
 STATE_SCRIPT_ONLY,
 `状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら、同じコマンドの末尾に行範囲を足して〔例: 1 20〕分割実行し全件を取得する）:`,
 scriptCommand('state-verify.sh',` ${STATE_FILE}`),
-`返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
+`返却: NOFILE なら headerLines: "NOFILE"・hashes: {}。それ以外は headerLines へ、出力の KEYS で始まる行と HIGHWATER で始まる行を 1 文字も変えずにそのまま写す（2 行を改行でつなぐ。数値を取り出したり、並べ替えたり、計算し直したり、返すキー一覧から作ったりしない。分解と照合はホストが行う）。3 行目以降の「キー ハッシュ」行を hashes（キー → ハッシュ）。`,
 ].join('\n'),
 {label:'state:load-verify',schema:STATE_VERIFY_SCHEMA,isValid:isValidStateVerifyResult},
 )
+const check=verifyRaw&&{ ...parseStateVerifyHeader(verifyRaw.headerLines),hashes:verifyRaw.hashes}
 
 
 
@@ -3965,8 +4023,8 @@ const SCRIPT_SHA256={
 
 
 
-'state-read.sh':'0d5a5438dd7b3743126c472444ce867c9231b1ee7c8df006a09f28961479eda1',
-'state-verify.sh':'e7c691c3294b693f79c1016bbad9b4cf1e2ccbfb7207bfc43e445d68d77168fa',
+'state-read.sh':'9928021f27f58f6775982020538a213ebf49a05530ea5ae92e324109ff5c1ea2',
+'state-verify.sh':'1474b1711429e64705380cd44c4a6769efd933138083df61c2bd345ccbec7cc4',
 'fetch-tree.sh':'6ab0898e5dadeb35946d3c773d7fae8783fa1e3f6f2e4a7da32efd24f5fe8b5e',
 'fetch-root-ancestors.sh':'e96e2267f74f145e11f4715091cade84fbda9836051f0905becb4951e46e7877',
 'probe-declared-deps.sh':'3d48081e129b1242ef63604bff7a89460a4d3b86496fc90a85351252cc342d95',

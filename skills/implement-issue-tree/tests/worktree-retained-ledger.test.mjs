@@ -13,7 +13,7 @@
 // 旧 worktree が保持されると物理的には 2 本になるので、旧（載っていなければ kind retained）に加えて新しい worktree（kind replacement）も載せる。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { importDefinitions, runScript, BASE_ARGS, source, stateLoadOut, stateVerifyOut } from './lib/stub-run.mjs'
 import { signedReply, commandInputOf } from './lib/signed-output.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
@@ -605,10 +605,10 @@ function mergeLoopFix({ saved, events, fixPath = FIX_A, bytes = () => 1024 }) {
     }
     if (label === 'fix:#2') { events.push('fix'); return { pushed: false, summary: 'fixed', worktreePath: fixPath } }
     if (label === 'state:cleanup:#2') return GONE
-    if (saved && label === 'state:load') return { ok: true, fileExisted: true, items: { 2: saved }, highWaterBytes: 0, highWaterVersion: 0 }
+    if (saved && label === 'state:load') return stateLoadOut('', { 2: saved }, 0)
     if (saved && label === 'state:load-verify') {
       const hashes = { 2: sha256Hex(canonicalJson(saved)) }
-      return { fileExists: true, hashes, keysSha256: sha256Hex(canonicalJson(['2'])), keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      return stateVerifyOut(hashes, sha256Hex(canonicalJson(['2'])), 1)
     }
     return timeline(events, bytes)(label, opts, prompt)
   }

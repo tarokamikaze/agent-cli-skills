@@ -22,7 +22,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { hashPrecheckReply } from './lib/signed-output.mjs'
-import { requestedNumbers, STUB_SKILL_DIR } from './lib/stub-run.mjs'
+import { requestedNumbers, STUB_SKILL_DIR, stateLoadOut } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
   dirname(fileURLToPath(import.meta.url)),
@@ -320,15 +320,12 @@ function buildTree(specs) {
   }))
 }
 
-function stateVerifyFor(items) {
+// 返却は state-verify.sh の先頭 2 行（headerLines）と「キー ハッシュ」行（hashes）。数値の分解はホストが行う。
+function stateVerifyFor(items, version = 0) {
   const keys = Object.keys(items).sort()
   return {
-    fileExists: true,
+    headerLines: `KEYS ${sha256Hex(canonicalJson(keys))} ${keys.length}\nHIGHWATER bytes=0 version=${version}`,
     hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(items[k]))])),
-    keysSha256: sha256Hex(canonicalJson(keys)),
-    keysCount: keys.length,
-    highWaterBytes: 0,
-    highWaterVersion: 0,
   }
 }
 
@@ -341,11 +338,11 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') {
-      return { ok: true, fileExisted: saved !== null, items: saved ?? {}, highWaterBytes: 0, highWaterVersion: saved ? 2 : 0 }
+      return stateLoadOut(prompt, saved)
     }
     if (label === 'state:load-verify') {
-      if (saved === null) return { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
-      return { ...stateVerifyFor(saved), highWaterVersion: 2 }
+      if (saved === null) return { headerLines: 'NOFILE', hashes: {} }
+      return stateVerifyFor(saved, 2)
     }
     // スクリプトが返却ノードを書き換える（optinTests の採用結果）ため、実行ごとに複製して返す。
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }

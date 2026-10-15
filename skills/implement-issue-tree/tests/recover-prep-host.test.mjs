@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { importDefinitions, runScript, BASE_ARGS, source, stateLoadOut, stateVerifyOut } from './lib/stub-run.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(['sha256Hex', 'canonicalJson'], 'recover-prep-host')
@@ -23,8 +23,8 @@ function recoverRun(item, reply) {
   return runScript({
     args: BASE_ARGS,
     override: (label) => {
-      if (label === 'state:load') return { ok: true, fileExisted: true, items: { 2: item }, highWaterBytes: 0, highWaterVersion: 0 }
-      if (label === 'state:load-verify') return { fileExists: true, hashes, keysSha256: keysSha, keysCount: 1, highWaterBytes: 0, highWaterVersion: 0 }
+      if (label === 'state:load') return stateLoadOut('', { 2: item }, 0)
+      if (label === 'state:load-verify') return stateVerifyOut(hashes, keysSha, 1)
       if (label === 'recover:#2') return reply
       if (label === 'state:cleanup:#2') return { ok: false, retained: true }
       return undefined

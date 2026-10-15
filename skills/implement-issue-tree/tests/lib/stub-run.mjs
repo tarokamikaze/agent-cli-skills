@@ -57,6 +57,24 @@ export const STUB_SKILL_DIR = '/repo/.claude/skills/implement-issue-tree'
 export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
 
 /**
+ * state:load の返却（state-read.sh summary と state.sh create の出力行をそのまま写す形。分解はホストが行う）。
+ * saved が null なら状態ファイルが無い: 通常は create を実行して STATE_RESULT {"ok":true}、dryRun の読み取り専用プロンプトでは作らない。
+ */
+export const STATE_CREATED_LINE = 'STATE_RESULT {"ok":true}'
+export function stateLoadOut(prompt, saved = null, version = 2) {
+  if (saved === null) return { summaryLine: 'NOFILE', createLine: /読み取り専用のため/.test(prompt) ? '' : STATE_CREATED_LINE, items: {} }
+  return { summaryLine: `OK count=${Object.keys(saved).length} bytes=0 version=${version}`, createLine: '', items: saved }
+}
+
+/**
+ * state:load-verify の返却（state-verify.sh の先頭 2 行をそのまま写す形。分解はホストが行う）。hashes が null なら NOFILE。
+ */
+export function stateVerifyOut(hashes, keysSha256 = '', keysCount = 0, bytes = 0, version = 0) {
+  if (hashes === null) return { headerLines: 'NOFILE', hashes: {} }
+  return { headerLines: `KEYS ${keysSha256} ${keysCount}\nHIGHWATER bytes=${bytes} version=${version}`, hashes }
+}
+
+/**
  * 依存宣言・ツリー外前提の取得プロンプト（probe-declared-deps.sh / probe-prereqs.sh を起動する 1 コマンド）から、
  * ホストが依頼した番号の並びを取り出す。コマンドが無ければ null。
  */
@@ -82,8 +100,8 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
-    if (label === 'state:load') return { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 }
-    if (label === 'state:load-verify') return { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
+    if (label === 'state:load') return stateLoadOut(prompt)
+    if (label === 'state:load-verify') return { headerLines: 'NOFILE', hashes: {} }
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
