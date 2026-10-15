@@ -219,15 +219,16 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | 項目 | 従来（プロンプト） | `state.sh` |
 |------|------------------|-----------|
 | 書き込み先 | プロンプトの `STATE_FILE` | `_/issue-trees/<正の整数>.json` の 1 形だけ（それ以外は exit 2 で何も書かない） |
-| patch の渡し方 | 未信頼範囲の囲み + ヒアドキュメント + `--slurpfile` | ヒアドキュメント（終端は呼び出しごとの nonce で作り、本文から nonce を除く）+ `--slurpfile`。patch は jq のプログラム文字列に入らない |
+| patch の渡し方 | 未信頼範囲の囲み + ヒアドキュメント + `--slurpfile` | 未信頼範囲の囲み（nonce 境界。本文から nonce を除く）+ Write ツールの入力ファイル `<状態ファイル>.input-<nonce>.json` + `--slurpfile`。コマンド行には `--input-nonce` と `--input-sha` だけを載せる（下の「入力ファイルの経路」）。patch は jq のプログラム文字列に入らない |
 | 入力の形 | なし | 入力はちょうど 1 個の JSON 値（複数の値が続く入力は拒否。`jq -e` は最後の値しか見ないため）。`merge`: 番号は 1 以上の整数・patch はオブジェクト。`init`: type は `implement` / `verify-close`。形が違えば書かず `invalid-input` |
 | 壊れた状態ファイル | jq の失敗に任せる | 書き換え前に `.items` がオブジェクトかを確かめ、違えば書かない（`rewrite-failed`）。出力も同じ検査を通ってから置換する |
 | 並行書き込み | なし（ホストの直列化だけ） | スナップショットから計算し、置換の直前に元ファイルが変わっていないか確かめる。変わっていれば最初からやり直し、3 回続けば `changed-concurrently`（別ランの書き込みを失わない） |
 | 一時ファイル | 後始末はエージェント任せ | 入力の一時ファイル・`st_rewrite` のスナップショット・出力用一時ファイルのパスを trap から見える変数（`pf` / `ST_SNAP` / `ST_TMP`）で持ち、正常終了・失敗経路・TERM / INT / HUP のいずれでも消す（テストが残存 0 を確かめ、SIGTERM 中断も実測する）。SIGKILL では残る |
 
-- **`state.sh` が持たないもの。** 読み込み（`loadState` の読込・照合）と worktree / branch の削除（`state:cleanup`・最終スイープ）は移していない。削除は `--force` を使う別の安全判定を含み、確認と削除を同じスクリプトで行う独立の弾で扱う。掃除の手順 5（削除後の `.worktree` のクリア）だけは `state.sh merge` を呼ぶ。
+- **`state.sh` が持たないもの。** 読み込み（`loadState` の読込・照合。`state-read.sh`・`state-verify.sh` が持つ。下の「状態ファイル・GitHub の読み取り」）と worktree / branch の削除（`state:cleanup`・最終スイープ）は移していない。削除は `--force` を使う別の安全判定を含み、確認と削除を同じスクリプトで行う独立の弾で扱う。掃除の手順 2（削除後の `.worktree` のクリア）だけは `state.sh clear-worktree --issue <N>` を呼ぶ（JSON を渡さない固定の書き換え）。状態ファイルが無いときの初期作成は `state.sh create`（置き先を `ln` で作り、同時に初期化しても既存のファイルを上書きしない。ハードリンク非対応のファイルシステムでは初期作成が失敗し、ランは開始時に停止する）。
+- **入力ファイルの経路（`--input-nonce` / `--input-sha`）。** ヒアドキュメントで JSON（`{}` と引用符）をコマンド行に載せると、利用側の Claude Code の権限確認（展開による難読化の検査）がランのたびに出て、Workflow の agent は答えられずに止まる。そこで `merge` / `init` の入力は、エージェントが Write ツールで `<状態ファイル>.input-<nonce>.json` に書き、`state.sh` が読む。ホストは `SHA-256(nonce + 改行 + モード + 改行 + JSON)`（`stateInputSha256`）を `--input-sha` で渡し、スクリプトはファイルの内容（末尾の改行を除く）から同じ式で計算した値と一致するときだけ書く。写し間違い・別の呼び出しやモード向けの入力の流用は、書き込む前に止まる（`input-mismatch`。悪意ある書き換えへの認証ではない）。照合と読み込みは自分の一時ファイルへ写したものに対して行い、入力ファイルは nonce の形を確かめたあと、成否・引数の誤りに関わらず消す（消すのは検証済みの状態ファイルのパスと nonce から組み立てたこの形のファイルだけ）。標準入力の経路はテストと手作業のために残す。
 - **変更検知はアドバイザリで、排他ロックではない。** 検知から `mv` までの数ミリ秒の窓は残る。同一ランの書き込みはホストが直列化している（`enqueueStateWrite`）ので、検知が対象にするのは別ランが同じ状態ファイルを書いた場合である。
-- **掃除の手順 5 にも同じ判定指示を入れる。** `state.sh` は書き込みに失敗しても exit 0 で `STATE_RESULT {"ok":false,…}` を出すので、掃除プロンプトの手順 5 にも「`ok` が false・結果の行なし・非 0 終了なら掃除全体の `ok` を false で返す」を入れる（書き込みプロンプトと同じ `STATE_NOTE`）。open な項目が 0 件のときの `init` はホストが呼ばずに成功として扱う（`state.sh` は空配列を `invalid-input` で拒否する）。
+- **掃除の手順 2 にも同じ判定指示を入れる。** `state.sh` は書き込みに失敗しても exit 0 で `STATE_RESULT {"ok":false,…}` を出すので、掃除プロンプトの手順 2 にも「`ok` が false・結果の行なし・非 0 終了なら掃除全体の `ok` を false で返す」を入れる（書き込みプロンプトと同じ `STATE_NOTE`）。open な項目が 0 件のときの `init` はホストが呼ばずに成功として扱う（`state.sh` は空配列を `invalid-input` で拒否する）。
 - **失敗の返し方は従来と同じ。** 結果の行が出ない・非 0 終了・`ok: false` は、エージェントが `ok: false` を返し、ホストの既存の経路（`StructuredOutput` 未返却は sonnet へ 1 回フォールバック、応答した上での失敗はフォールバックしない）に乗る。`merge` が失敗したら掃除をしない（回復情報を保全する）契約も変えていない。
 - **静的ガード**（`tests/script-static-guard.test.mjs`）は `state.sh` と `lib/state-lib.sh` も走査する。`rm` は自分が作った一時ファイルへの `rm -f` だけで、`rm -rf`・`--force` の綴りは無い（ガードが固定する）。
 
@@ -401,6 +402,25 @@ monitor の手順 2〜3 は、HEAD sha のチェックの完了を `gh pr checks
 
 単体テスト（判断の表〔`rp_resolve` 19 行・`rp_scan_status`・`rp_wip_plan`・`rp_wip_after`・`rp_wip_ok`・`rp_diff_state`・`rp_is_sha`〕・実 git のサンドボックス〔clean・追跡変更・staged・未追跡・深い階層・混在・ignore のみ・`showUntrackedFiles=no`・グローバルの除外・フックの拒否 / 書き換え・コンフリクト中・入れ子の独立 repo・submodule〔clean・内部の変更・`diff.ignoreSubmodules=all` 下〕・観測不能〔index 破損〕・state との食い違い・dead worktree・branch だけの残骸・ブランチ不在・detached・メイン worktree・未登録パス・`.git` 破損・HEAD が base と同名・差分の件数・打ち消しコミット・base の取得失敗〔古い追跡 ref あり〕・base 不在・引数の誤り・cwd がリポジトリの外・run-verified.sh 経由〕を bash 3.2 と 5 で・ホスト配線〔コマンドの組み立て 3 形・手作業の文章が残っていないこと・第 1 層 / 第 2 層のゲート〕）と変異 25 件でのみ検証している。**実ランの隔離なし（メイン checkout）の Recover エージェントからの `run-verified.sh` 経由の起動は未検証**で、`git fetch` は実 GitHub に対して実行していない（ローカルの bare リポジトリのみ）。フックは `pre-commit` のみ実測し、`commit-msg`（commitlint）・`prepare-commit-msg` は未実測。
 
+## 状態ファイル・GitHub の読み取りと、agent に実行させるコマンドの形
+
+エージェントがその場で組み立てるシェル（関数定義・`$(...)` の入れ子・`{}` と引用符を含む jq の式・`;` / `&&` / `|` の連結・ヒアドキュメントの JSON）は、書き方が毎回変わり、利用側の Claude Code の権限確認（auto mode の分類器・展開による難読化の検査）や PreToolUse の hook がランのたびに止める。そこで次の読み取りも同梱スクリプトへ移し、エージェントには `bash '<skillDir>/scripts/run-verified.sh' <sha256> <name>.sh <引数>` の 1 コマンドだけを実行させる。引数はホストが検証した整数・状態ファイルのパス・sha と、agent が値に置き換える `<...>` の目印だけで、`{}` と引用符を含めない。
+
+| スクリプト | 置き換えた手順 | 出力 |
+|------------|----------------|------|
+| `state-verify.sh` | `state:load-verify` の 1 行のシェル | 旧コマンドとバイト単位で同じ（`KEYS` 行・高水位の行・`<キー> <sha256>` 行・`NOFILE`。行範囲の分割実行も同じ） |
+| `state-read.sh` | `state:load` の読み込み・`state:load-fill` の jq・前提プローブの PR 番号の読み取り | `summary`（`NOFILE` / `PARSE_ERROR` / `OK <件数> <高水位> <版>`）・`range`・`keys`（旧 jq と同じ値） |
+| `fetch-tree.sh` | Tree フェーズのツリー取得と opt-in マーカー抽出・`closePrompt` の子孫の再帰 | `NODE` 行・`OPTIN` 行・`DONE <件数>`。件数が `total` と合わなければ取り直し、なお合わなければ `MISMATCH` と exit 1 |
+| `probe-declared-deps.sh` / `probe-prereqs.sh` | 依存宣言・ツリー外前提の `for` ループ | 旧コマンドと同じ 1 行の JSON（`sig` 付き）と `FAILED #<番号>`。レート制限の判定もスクリプトが行い、確認できたときだけ `RATE_LIMIT` 行を出す |
+| `fetch-root-ancestors.sh` | 祖先チェーンの GraphQL | 旧コマンドと同じ配列 |
+| `detect-external-checks.sh` | 外部チェック観測のパイプライン（`xargs`・`sh -c`） | App slug を 1 行に 1 つ |
+| `nonce-seed.sh` | 境界トークンの seed（`head -c 32 /dev/urandom \| od \| tr`） | 小文字 16 進 64 桁・改行なし |
+| `compare-files.sh` | monitor 手順 1b の compare（`--jq '{status:...,files:[...]}'`） | 旧コマンドとバイト単位で同じ JSON |
+
+- **信頼の水準は旧プロンプトと同じ。** 出力は封筒にせず、エージェントが転記した値をホストが従来どおり照合する（状態ファイルは `keysSha256`・`keysCount`・項目ごとの `hashes`、依存とツリー外前提は `sig`、ツリーは `subIssuesTotal` との件数照合）。変わるのは、エージェントがシェルを書き間違える・書き方が変わる余地が無くなることと、launcher のハッシュ照合で版ずれ・書き換えを起動前に止められることである。そのため `args.skillDir` は `dryRun` を含む全ランで必須になる（`dryRun` も状態ファイルの読み込みとツリー取得を行う）。
+- **単独のコマンドで済むもの**（Implement・recover-implement の `git fetch` と `git checkout`、クローズ検証のコメントとクローズ、merge-exec の `gh pr merge <N> --squash --delete-branch --match-head-commit <HEAD sha>`）は、スクリプトにせず「1 回の Bash 呼び出しで 1 本ずつ」と書いた文面にし、変数の代入・`;` / `&&` での連結をさせない。
+- **回帰防止。** 開発ファイルの目印 `cmd('...')` が、エージェントに実行させるコマンドを組み立てるたびに（テストのときだけ）記録する。`tests/agent-command-shapes.test.mjs` は記録したコマンドとプロンプト全文から拾った断片を `tests/lib/command-shape.mjs` で検査し、(a) `cd` のあとの `&&` / `;`、(b) ファイルを読む `sed -n` / `cat` / `head` / `tail`、(c) `;` / `&&` で 3 本以上の連結、(d) `{` `[` `|` を含む `gh` の `--jq`、が理由付きの既知の例外にしか無いこと、記録したコマンドの全文（ヒアドキュメントの本文を含む）に brace と引用符の同居が無いこと（例外は外部チェックを宣言したランの `merge-gate.sh --external '<JSON>'` だけ）、ヒアドキュメントが許可した 3 箇所（ハッシュの予検査の表・測定するパスの一覧・スイープの候補のパスの配列。どれも本文に brace を含まない）にしか無いことを確かめる。`tests/ci-scripts.test.mjs`・`tests/issue-scripts.test.mjs`・`tests/state-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh・実ファイルで同じ入力に対して旧コマンドとスクリプトの出力が一致することを確かめる。
+
 ## ハッシュ埋め込みと鮮度
 
 - 開発ファイル（`implement-issue-tree.src.js`）には、スクリプトごとの期待ハッシュの代わりに置換前の目印（`SCRIPT_SHA256` の値）を書く。`build-workflow.mjs` は**コメント除去とトークン照合より前に**、同じディレクトリのスクリプトの `bundleSha256`（スクリプト本体 + `scripts/lib/*.sh` のバイト列連結の SHA-256）へ置換する。置換後の文字列を「開発ファイル」としてトークン照合に使うので、照合の定義（種類・値・開始行）は変わらない。生成物に目印が残らない。
@@ -410,7 +430,7 @@ monitor の手順 2〜3 は、HEAD sha のチェックの完了を `gh pr checks
 
 ## 運用
 
-- `args.skillDir` は呼び出し側（起動手順）が渡す。配布後、既存の呼び出し手順は更新が必要になる。`dryRun` でないランで未指定なら起動時エラーで停止する（第 2 弾から、monitor が毎回 `observe-pr.sh` を使うため、`maxResidualWorktreeBytes: 0` のランも対象）。named workflow（`{name: "implement-issue-tree"}`）で起動する場合も同じ。
+- `args.skillDir` は呼び出し側（起動手順）が渡す。配布後、既存の呼び出し手順は更新が必要になる。未指定なら `dryRun` を含む全ランで起動時エラーで停止する（monitor が毎回 `observe-pr.sh` を使い、状態ファイルの読み込みとツリー取得も同梱スクリプトで行うため、`maxResidualWorktreeBytes: 0` のランも対象）。named workflow（`{name: "implement-issue-tree"}`）で起動する場合も同じ。
 - 同期で届くのはスキルディレクトリ全体（Workflow とスクリプトを同じコミットで）なので、通常は版ずれは起きない。`run-verified.sh` が exit 3 を出したときは、スキルの同期が途中か、スクリプトがローカルで変更されている。同期し直す。
 - 新しいスクリプトを足すとき: `scripts/` 直下に `*.sh`（小文字・数字・`-`・`.`）で置き、`SCRIPT_SHA256` に目印を足し、`bash <skillDir>/scripts/run-verified.sh` 経由で起動し、封筒で返す（ホストが値を採用しないスクリプトは、上の第 3 弾の節の理由づけを示したうえで封筒なしにできる）。`scripts/lib/*.sh` を足すと、**すべてのスクリプトのハッシュが変わる**（`run-verified.sh` は lib 全体をハッシュに含める）。再ビルドで追従する。`tests/script-static-guard.test.mjs` の走査対象は `scripts/*.sh` と `scripts/lib/*.sh` の全体なので、新しいスクリプトも自動で対象になる。冒頭コメントに入力・出力・終了コードを書く。`bash 3.2`（macOS）と GNU の両方で動く書き方に限る（`paste`・`bc`・GNU 専用フラグ・`date -d`・`sed -i`・`mapfile`・連想配列を使わない）。
 

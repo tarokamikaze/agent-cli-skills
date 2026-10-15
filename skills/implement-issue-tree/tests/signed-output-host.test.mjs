@@ -485,7 +485,7 @@ test('起動時: dryRun でないランは、既定でもバイト軸オプト�
     const { error, calls } = await runDriver(args)
     assert.ok(error, `エラーで停止する: ${JSON.stringify(args)}`)
     assert.match(error.message, /args\.skillDir にはスキルディレクトリ.*絶対パスを渡す/)
-    assert.match(error.message, /省略できるのは dryRun: true のときだけ/)
+    assert.match(error.message, /dryRun を含む全ランで必須/)
     assert.deepEqual(calls, [])
   }
 })
@@ -498,10 +498,12 @@ test('起動時: skillDir の形式不正は、他の引数より先に起動時
   }
 })
 
-test('起動時: dryRun: true のランは skillDir を省略できる（スクリプトを使うエージェントを起動しない）', async () => {
+// dryRun も状態ファイルの読み込み（state-read.sh）とツリー取得（fetch-tree.sh）を同梱スクリプトで行うため、skillDir を省略できない
+test('起動時: dryRun: true のランも skillDir 未指定ならエージェントを 1 回も呼ばずエラーで停止する', async () => {
   for (const args of [{ parent: 1, dryRun: true }]) {
-    const { error } = await runDriver(args)
-    assert.ok(!error || !/skillDir/.test(error.message), `${JSON.stringify(args)}: ${error?.message}`)
+    const { error, calls } = await runDriver(args)
+    assert.ok(error && /dryRun を含む全ランで必須/.test(error.message), `${JSON.stringify(args)}: ${error?.message}`)
+    assert.deepEqual(calls, [])
   }
 })
 
