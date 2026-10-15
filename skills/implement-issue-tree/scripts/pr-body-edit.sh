@@ -2,7 +2,7 @@
 # pr-body-edit.sh — PR 本文を取得し、決まった補正だけを加えて gh pr edit で書き戻し、反映を確かめるスクリプト
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる。カレントディレクトリのリポジトリが対象）:
-#   bash pr-body-edit.sh [--repo <owner/name>] ensure     <PR> <issue> [--milestone-warning] [--oos <nonce> <sha256>] [--optin <sha> <結果> <コマンド>...]
+#   bash pr-body-edit.sh [--repo <owner/name>] ensure     <PR> <issue> <head> <base> [--milestone-warning] [--oos <nonce> <sha256>] [--optin <sha> <結果> <コマンド>...]
 #   bash pr-body-edit.sh [--repo <owner/name>] optin      <PR> <sha> <結果> <コマンド>...
 #   bash pr-body-edit.sh [--repo <owner/name>] oos-append <PR> <nonce> <threadId>...
 #   --repo はホストの args.repo（gh の呼び出しを対象リポジトリへ束縛する。無ければカレントディレクトリのリポジトリ）。
@@ -13,7 +13,11 @@
 # 含み、PR 本文（未信頼の自由文）を扱うシェルを agent が書くことになるため、ここへ移した（Issue #11 の範囲 C）。
 #
 # サブコマンド:
-#   ensure      PR 作成の手順 1c（既存 PR を再利用するとき）。旧手順と同じ順で補正する:
+#   ensure      PR 作成の手順 1c（既存 PR を再利用するとき）。<head>・<base> はホストが知る作業ブランチ名とベースブランチ名を
+#               URL エンコードしたもの（required-context-missing.sh と同じ形。/ は %2F）。PR 番号は agent が手順 1b の
+#               gh pr list の結果から置き換える値で、写し間違えると無関係な PR の本文を書き換えて別の Issue を閉じうるため、
+#               本文に触れる前に gh pr view <PR> の headRefName・baseRefName と照合し、一致しなければ（取得の失敗を含む）
+#               gh pr edit を呼ばずに失敗する（Issue #18）。そのあと旧手順と同じ順で補正する:
 #               1. 本文に「Closes #<issue>」が無ければ、空行 2 つと「Closes #<issue>」を末尾へ足す
 #               2. --oos のとき、本文に「## 対象外（out-of-scope）」が無ければ、空行 1 つと agent が Write ツールで書いた
 #                  対象外節（ホストが SHA-256 を渡す。束縛先は issue 番号。照合の定義は lib/pr-write.sh の
@@ -52,9 +56,11 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 OOS_HEADING='## 対象外（out-of-scope）'
 # milestone の警告の行の先頭（pr-push.sh --mode pr が新規作成の本文へ足すものと同じ文言）
 MILESTONE_WARNING_PREFIX='> **警告**: Closes 対象の '
-# GitHub の closing keyword（close・closes・closed・fix・fixes・fixed・resolve・resolves・resolved）の後に、任意のコロンと
-# 空白を挟んで Issue の参照（#N・owner/repo#N・https://github.com/owner/repo/issues/N）が続く形。grep -iE で使う
-CLOSING_KEYWORD_RE='(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+(([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+|https?://github[.]com/[^/[:space:]]+/[^/[:space:]]+/(issues|pull)/[0-9]+)'
+# GitHub の closing keyword（close・closes・closed・fix・fixes・fixed・resolve・resolves・resolved）の後に、任意の空白・
+# コロン・開き括弧（( < [）を挟んで Issue の参照（#N・owner/repo#N・GH-N・https://github.com/owner/repo/issues/N）が続く形。
+# grep -iE で使う。GitHub が閉じると確かめた形より広く、拒否する側に倒す（closes:#12・fixes GH-12・Closes (#12)・
+# Closes <URL>・Closes [#12](URL) も拒否する。Issue #21）
+CLOSING_KEYWORD_RE='(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:](<[]*(([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+|gh-[0-9]+|https?://(www[.])?github[.]com/[^/[:space:]]+/[^/[:space:]]+/(issues|pull)/[0-9]+)'
 
 usage() {
   echo "使い方: pr-body-edit.sh [--repo owner/name] {ensure|optin|oos-append} PR番号 引数..." >&2
@@ -100,6 +106,8 @@ shift 2
 pw_valid_pos_int "${pr}" || usage
 
 issue=''
+want_head=''
+want_base=''
 milestone_warning=0
 oos_nonce=''
 oos_sha=''
@@ -129,6 +137,10 @@ case "${sub}" in
     issue=$1
     shift
     pw_valid_pos_int "${issue}" || usage
+    [ $# -ge 2 ] || usage
+    want_head=$(pw_decode_branch "$1") || usage
+    want_base=$(pw_decode_branch "$2") || usage
+    shift 2
     if [ $# -ge 1 ] && [ "$1" = --milestone-warning ]; then
       milestone_warning=1
       shift
@@ -189,6 +201,9 @@ if [ -n "${oos_nonce}" ] && [ "${sub}" = ensure ]; then
   # 束縛先は issue 番号（再利用する PR の番号はホストがプロンプトを作る時点で決まっていない）
   pw_verify_written "${oos_nonce}" "${issue}" "${oos_sha}" "${section}" || exit 1
 fi
+if [ "${sub}" = ensure ]; then
+  pw_verify_pr_refs "${pr}" "${want_head}" "${want_base}" || exit 1
+fi
 if [ "${sub}" = oos-append ]; then
   [ -f "${written}" ] || fail "Write ツールで書くファイルが無い（${written}）"
   cp -- "${written}" "${section}" || fail "Write ツールで書いたファイルを読めない"
@@ -215,9 +230,15 @@ if [ "${sub}" = oos-append ]; then
     # 行の本文は未信頼データ（指摘の要約など）。GitHub の closing keyword の形（Closes #N・fixes owner/repo#N・
     # resolved: https://github.com/<owner>/<repo>/issues/N など。大文字小文字を問わない）を含むと、PR のマージ時に
     # 無関係な Issue を閉じさせられるため、書き込まない
-    if printf '%s\n' "${l}" | grep -qiE "${CLOSING_KEYWORD_RE}"; then
-      fail "対象外の行に Issue を閉じる記法（close / fix / resolve の後の #番号・owner/repo#番号・Issue の URL）がある"
-    fi
+    # grep の終了コードは 1（一致しない）のときだけ通す。2 以上（エラー）を「一致しない」と同じに扱うと、検査できなかった
+    # 行を書き込むことになる（Issue #21）
+    printf '%s\n' "${l}" | grep -qiE "${CLOSING_KEYWORD_RE}"
+    rc=$?
+    case "${rc}" in
+      0) fail "対象外の行に Issue を閉じる記法（close / fix / resolve の後の #番号・owner/repo#番号・GH-番号・Issue の URL）がある" ;;
+      1) ;;
+      *) fail "対象外の行を closing keyword の検査で検査できない（grep の終了コード ${rc}）" ;;
+    esac
     printf '%s\n' "${l}" >>"${add}"
   done <"${section}"
   [ "${lines}" -ge 1 ] || fail "対象外の行が 1 行も無い"

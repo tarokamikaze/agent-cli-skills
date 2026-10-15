@@ -91,7 +91,7 @@ test('prCreatePrompt: push の status は race を含めて PR 作成を止め�
 
 test('prCreatePrompt: 再利用 PR の本文の補正（pr-body-edit.sh ensure）にも args.repo を --repo で渡し、agent に gh pr view / gh pr edit を組み立てさせない', () => {
   const prompt = prCreatePrompt(item, impl, [])
-  assert.match(prompt, /pr-body-edit\.sh --repo Fandhe-AI\/agent-cli-skills ensure <番号> 466\n/)
+  assert.match(prompt, /pr-body-edit\.sh --repo Fandhe-AI\/agent-cli-skills ensure <番号> 466 fix%2F466-pr-create-checkout-verify main\n/, "ブランチ名・ベース名を URL エンコードして渡す（PR の head・base の照合）")
   assert.doesNotMatch(prompt, /gh pr (view|edit) <番号>/)
   assert.match(prompt, /<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま/, '置換対象の列挙に <headSha> を含める')
 })
@@ -146,7 +146,7 @@ test('baseMergePrompt（自動 base 取り込み）は pr-push.sh を呼ばな�
 test('prCreatePrompt: 再利用 PR の milestone 警告は pr-body-edit.sh ensure の --milestone-warning で、1 回の gh pr edit の中で足す', () => {
   for (const outOfScope of [[], ['対象外の項目 A']]) {
     const prompt = prCreatePrompt(item, impl, outOfScope)
-    assert.match(prompt, /1b の結果の milestone が unassigned のときだけ、<番号> 466 の直後に --milestone-warning を足す/)
+    assert.match(prompt, /1b の結果の milestone が unassigned のときだけ、466 fix%2F466-pr-create-checkout-verify main の直後に --milestone-warning を足す/)
     assert.match(prompt, /1b の結果の milestone が unassigned なら milestone の警告の行を（無ければ）足す/)
   }
 })

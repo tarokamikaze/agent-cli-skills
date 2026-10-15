@@ -29,6 +29,7 @@ CI リソース節約のため「push 前 review」設計を採用している�
 - `gh` の機能の前提（`observe-pr.sh`）: `gh pr view --json state,headRefOid,mergeable,headRefName,baseRefName,closingIssuesReferences,isCrossRepository`・`gh api --paginate`・`gh api graphql`。複数ページの合算は `gh api --paginate` の出力を `jq -s` で行い、`gh api --slurp`（新しめの gh の機能）には依存しない。**必要な gh の最低版は未確認**（実走確認は gh 2.102.0 の実 API のみ。公式のリリースノートで各フィールドの導入版は確かめていない）。時間制限のために bash のジョブ制御（`set -m`）と `mktemp`・`date +%s`・`sleep` を使う（macOS の bash 3.2 と Linux で動く）。base 取り込みの `scripts/base-merge.sh` は `gh pr view --json number,headRefName --jq …`（gh 内蔵の jq。外部の `jq` は要らない）と、`git remote get-url --push --all`（git 2.7 以上）・`git merge --no-ff --no-edit -F`（**git 2.20 以上**。実測では 2.20.4 にあり 2.18.4 以前に無く、2.19 系は未確認。無い git では base 取り込みが `commitFailed`〔`failed` 終端〕になり push はされない。詳細は references/script-trust-model.md）・`git merge-base --is-ancestor`・`git ls-remote` を使う。`observe-pr.sh --mode push` は push した HEAD を `git rev-parse HEAD` で読むため、pr-create・fix のエージェントの作業ディレクトリ（push した worktree）で実行する
 - `awk` CLI がインストールされていること（`command -v awk` で確認）。同節のエージェント実行可能コマンド (A) は `--jq` がページ単位にしか適用できないため、ページ跨ぎの重複を集約する際にシェル側 `awk` へ依存する。未導入の場合はそのコマンドを実行せず `UNDETERMINED`（判定不能）として扱う
 - git working tree が clean であること（`git status` で確認）
+- （知っておくこと）コミットを作る agent は、`git add` の前に `scripts/worktree-exclude.sh` で一時ファイルのパターン（`.implement-issue-tree-*.md`・`/_/issue-trees/*.json.input-*.json`）を git の除外設定に載せる。書く先は `git rev-parse --git-path info/exclude` が示す**全 worktree 共有の `info/exclude`** で、**ランのあとも残る**（リポジトリにコミットされる `.gitignore` は変えない）。不要なら、`# implement-issue-tree:` のコメント行とその下の行を手で消す。並列の agent が同時に書くと同じ行が重複しうるが、git には無害
 - 測定スクリプト（`scripts/measure-*.sh`・`scripts/run-verified.sh`）が使う `bash`・`du`・`df`・`awk` と、`sha256sum` または `shasum`（macOS の標準は `shasum`）。macOS（BSD userland・bash 3.2）と Linux（GNU）の両方で動く書き方に限っている。どれかが無いと測定が失敗し、残置バイト軸が有効なランは新規着手を止める（fail-closed）
 - マージ先ブランチが CI green の状態であること（`autoMerge` 運用ではランの完了後にも確認する。後述の strict = false 前提により、古い base に対して成功したチェックのままマージされ得るため）。**この確認はマージ先ブランチへの push で CI が起動することに依存する**。push トリガの workflow が無い、または `paths` フィルタで該当 head では起動しないリポジトリでは前提確認・完了後確認のいずれも検証不能であり、`autoMerge: true` は非推奨とする。成立可否の確認手順（対象（マージ先）ブランチを検査するプローブ。`branch` 未指定時のみ既定ブランチへフォールバック）と不成立時の扱いは references/automerge-design.md の「補償策の成立確認（base CI プローブ）」節を参照
 - （`autoMerge: true` で使う場合）ベースブランチの ruleset で **required status checks の strict（マージ前の base 最新化必須 = `strict_required_status_checks_policy`）を `false` にしていること**。`true` だと 1 件マージするたびに他の open PR の base が陳腐化し、並列ラン（`parallel >= 2`）が収束しない。G0 は strict を要件にしないため `false` でも自動マージは成立する（references/automerge-design.md の「strict を G0 の要件にしない理由」節）
@@ -43,7 +44,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 - **`.agents/skills/` に vendored**（`npx skills add Fandhe-AI/agent-cli-skills` で導入した downstream リポジトリ）: `.agents/skills/implement-issue-tree/scripts/implement-issue-tree.js`
 - **`.claude/skills/` symlink 経由**（本リポジトリが内部参照に使うレイアウト。実体は `skills/` を指す symlink）: `.claude/skills/implement-issue-tree/scripts/implement-issue-tree.js`
 
-**`args.skillDir`（配布後は呼び出し側が必ず渡す）:** `scriptPath` と同じスキルディレクトリ（上の 3 レイアウトのいずれかの `implement-issue-tree/`。`scripts/` の 1 つ上）を**絶対パス**で `args.skillDir` に渡す（例: `/Users/me/repo/.claude/skills/implement-issue-tree`。相対の `scriptPath` を使う場合は `$(pwd)/.claude/skills/implement-issue-tree` のように起動時のメイン作業ディレクトリで絶対化する）。Workflow スクリプト自身はファイルシステムに触れないため、決定的な手順をスキル同梱のスクリプトへ切り出した部分（Issue #603。測定 `scripts/measure-*.sh`・PR の観測と待機 `scripts/observe-pr.sh`・base 取り込み `scripts/base-merge.sh`・PR 作成と fix の push `scripts/pr-push.sh`）の実行場所をここから決める。**ラン開始時（`dryRun` を含む。`skillDir` を渡したラン）に、埋め込みの全スクリプトのハッシュを実ファイルと 1 回照合し（エージェント 1 回。`run-verified.sh --verify-only`）、版ずれ・欠落は何も着手せずに停止する**（予検査。検出できるのは版ずれと転記ミスで、悪意あるエージェントの捏造ではない。各スクリプトの起動時の照合は別に毎回働く）。**named workflow（`{name: "implement-issue-tree"}`）で起動する場合も `args.skillDir` が要る**（named workflow は `.claude/workflows/implement-issue-tree.js` を指すだけで、スクリプトの置き場所を Workflow ランタイムは教えない）。サブエージェントは必ずこのメイン作業ディレクトリ側の `scripts/run-verified.sh` を `bash` で起動し（実行ビットに依存しない）、worktree 内のコピーは使わない。起動前に期待ハッシュ（ビルダーが生成物へ埋め込む）と照合し、不一致・欠落は起動せず fail-closed になる。信頼モデルは [references/script-trust-model.md](references/script-trust-model.md)。形式は `args.repo` と同じ厳格さで検証し、不正な値（相対パス・`..`・`//`・末尾 `/`・許可外の文字・400 文字超・文字列以外）は黙って読み替えず起動時エラーで停止する。**未指定のとき:** `dryRun` を含む全ランで、エージェントを 1 回も呼ぶ前に起動時エラーで停止する（状態ファイルの読み込み `scripts/state-read.sh`・`scripts/state-verify.sh`、ツリー取得 `scripts/fetch-tree.sh`、依存の機械取得 `scripts/probe-*.sh`・`scripts/fetch-root-ancestors.sh` も同梱スクリプトで行い、`dryRun` もこれらを使うため。monitor が毎回 `observe-pr.sh` を使うので `maxResidualWorktreeBytes: 0` でも必要）。
+**`args.skillDir`（配布後は呼び出し側が必ず渡す）:** `scriptPath` と同じスキルディレクトリ（上の 3 レイアウトのいずれかの `implement-issue-tree/`。`scripts/` の 1 つ上）を**絶対パス**で `args.skillDir` に渡す（例: `/Users/me/repo/.claude/skills/implement-issue-tree`。相対の `scriptPath` を使う場合は `$(pwd)/.claude/skills/implement-issue-tree` のように起動時のメイン作業ディレクトリで絶対化する）。Workflow スクリプト自身はファイルシステムに触れないため、決定的な手順をスキル同梱のスクリプトへ切り出した部分（Issue #603。測定 `scripts/measure-*.sh`・PR の観測と待機 `scripts/observe-pr.sh`・base 取り込み `scripts/base-merge.sh`・PR 作成と fix の push `scripts/pr-push.sh`・コミット前の一時ファイルの除外設定 `scripts/worktree-exclude.sh`）の実行場所をここから決める。**ラン開始時（`dryRun` を含む。`skillDir` を渡したラン）に、埋め込みの全スクリプトのハッシュを実ファイルと 1 回照合し（エージェント 1 回。`run-verified.sh --verify-only`）、版ずれ・欠落は何も着手せずに停止する**（予検査。検出できるのは版ずれと転記ミスで、悪意あるエージェントの捏造ではない。各スクリプトの起動時の照合は別に毎回働く）。**named workflow（`{name: "implement-issue-tree"}`）で起動する場合も `args.skillDir` が要る**（named workflow は `.claude/workflows/implement-issue-tree.js` を指すだけで、スクリプトの置き場所を Workflow ランタイムは教えない）。サブエージェントは必ずこのメイン作業ディレクトリ側の `scripts/run-verified.sh` を `bash` で起動し（実行ビットに依存しない）、worktree 内のコピーは使わない。起動前に期待ハッシュ（ビルダーが生成物へ埋め込む）と照合し、不一致・欠落は起動せず fail-closed になる。信頼モデルは [references/script-trust-model.md](references/script-trust-model.md)。形式は `args.repo` と同じ厳格さで検証し、不正な値（相対パス・`..`・`//`・末尾 `/`・許可外の文字・400 文字超・文字列以外）は黙って読み替えず起動時エラーで停止する。**未指定のとき:** `dryRun` を含む全ランで、エージェントを 1 回も呼ぶ前に起動時エラーで停止する（状態ファイルの読み込み `scripts/state-read.sh`・`scripts/state-verify.sh`、ツリー取得 `scripts/fetch-tree.sh`、依存の機械取得 `scripts/probe-*.sh`・`scripts/fetch-root-ancestors.sh` も同梱スクリプトで行い、`dryRun` もこれらを使うため。monitor が毎回 `observe-pr.sh` を使うので `maxResidualWorktreeBytes: 0` でも必要）。
 
 ```json
 {
@@ -92,7 +93,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | 引数 | 必須 | 既定 | 説明 |
 |------|------|------|------|
 | `parent` | 必須 | — | 親（ルート）イシュー番号。`issue` でも可 |
-| `skillDir` | 条件付き必須 | — | **このスキルディレクトリ（`scripts/` の 1 つ上）の絶対パス**（Issue #603）。決定的な手順を切り出したスクリプト（現在は残置 worktree のバイト測定 `measure-residual-bytes.sh`・実ディスク空き容量 `measure-free-disk.sh`・PR の観測と有界の待機 `observe-pr.sh`・自動 base 取り込みと push の検証 `base-merge.sh`・pr-create と fix の base 取り込み・push・PR 作成 `pr-push.sh`・状態ファイルの書き込み `state.sh`・merge-exec のマージ直前の検証 `merge-gate.sh`・worktree の破棄と掃除 `worktree-remove.sh`・Recover の機械手順 `recover-prep.sh`）をサブエージェントが実行する場所。ラン開始時にこの場所の全スクリプトのハッシュを 1 回予検査する（不一致・欠落は何も着手せずに停止。`dryRun` で省略したときは行わない）。`scriptPath` と同じスキルディレクトリを渡す。**必須になるのは `dryRun` でないラン**（monitor が `observe-pr.sh` を使うため、`maxResidualWorktreeBytes: 0` でも必要）で、未指定なら起動時エラーで停止する（エラー文に渡す値の例を示す。エージェントを 1 回も呼ばない）。`dryRun: true` なら省略できる。形式は絶対パス（英数字・`.`・`_`・`-`・`/`・半角スペース、先頭は `/` + 英数字または `_`）のみで、相対パス・`..`・`//`・末尾 `/`・400 文字超・文字列以外は起動時エラー。存在・ハッシュの確認はスクリプト側（実行時）が行い、欠落・不一致は測定失敗として新規着手を止める（fail-closed）。配布後は既存の呼び出し手順がこの引数を渡すよう更新が必要 |
+| `skillDir` | 条件付き必須 | — | **このスキルディレクトリ（`scripts/` の 1 つ上）の絶対パス**（Issue #603）。決定的な手順を切り出したスクリプト（現在は残置 worktree のバイト測定 `measure-residual-bytes.sh`・実ディスク空き容量 `measure-free-disk.sh`・PR の観測と有界の待機 `observe-pr.sh`・自動 base 取り込みと push の検証 `base-merge.sh`・pr-create と fix の base 取り込み・push・PR 作成 `pr-push.sh`・状態ファイルの書き込み `state.sh`・merge-exec のマージ直前の検証 `merge-gate.sh`・worktree の破棄と掃除 `worktree-remove.sh`・Recover の機械手順 `recover-prep.sh`・コミット前の一時ファイルの除外設定 `worktree-exclude.sh`・再利用 PR の本文の補正 `pr-body-edit.sh`）をサブエージェントが実行する場所。ラン開始時にこの場所の全スクリプトのハッシュを 1 回予検査する（不一致・欠落は何も着手せずに停止。`dryRun` で省略したときは行わない）。`scriptPath` と同じスキルディレクトリを渡す。**必須になるのは `dryRun` でないラン**（monitor が `observe-pr.sh` を使うため、`maxResidualWorktreeBytes: 0` でも必要）で、未指定なら起動時エラーで停止する（エラー文に渡す値の例を示す。エージェントを 1 回も呼ばない）。`dryRun: true` なら省略できる。形式は絶対パス（英数字・`.`・`_`・`-`・`/`・半角スペース、先頭は `/` + 英数字または `_`）のみで、相対パス・`..`・`//`・末尾 `/`・400 文字超・文字列以外は起動時エラー。存在・ハッシュの確認はスクリプト側（実行時）が行い、欠落・不一致は測定失敗として新規着手を止める（fail-closed）。配布後は既存の呼び出し手順がこの引数を渡すよう更新が必要 |
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
 | `phaseGate` | 任意 | `false` | **`true` でルート（`args.parent`）直下の子（Phase 親 or leaf）を sub-issues リスト順（`siblingIndex`。タイトルの `feat(phase-N):` 等は非信頼データのため解析しない）に直列化する opt-in ゲート**。直列化の単位は「ルート直下の子とその子孫全部（部分木）」で、単位 Uₖ（k≥1）の部分木は、それより手前の全単位 U₀…U_{k-1} の前提（子を持つ Phase 親なら自身を除く子孫全部、子を持たない leaf なら自身）がすべて `merged`/`closed` になるまで着手しない（Phase 親自身の verify-close 完了は前提に含めない設計。「前 Phase 親の**全子**が merged/closed」という要件に合わせるため）。新しいスケジューラ状態は作らず、既存の依存グラフ（`depsMap`）へ合成辺を追加するだけなので、dispatch ループ・前提プローブ（ラン中の人手マージ検知）・**前回ランで作成済みの次 Phase PR の monitoring 再開**にもそのままゲートが効く（同一引数での再実行でも次 Phase の PR は前 Phase 完了までマージされない）。ゲート辺は循環除去で削除されない（本文由来の逆向き `dependsOn` の方が無視される）。`autoMerge: false` では前 Phase の PR がマージ可能状態のまま `blocked` で停止するため、次 Phase へ進めるには人手マージ後の前提プローブ検知、または再実行を要する。`parent` に Phase 親そのものを渡した場合はその直下の子が直列化される（仕様上は動くが、ルート〔トラッキング issue〕への指定を推奨）。Phase ごとに別ランを直列起動する必要はない（verify-close がルートまで伝播する）。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
@@ -179,15 +180,9 @@ gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100"
 # 各 open イシューの本文を読み、機能的依存を抽出
 gh issue view <N>
 
-# 外部チェック観測（直前 3 件の merged PR の check-runs を確認。結果は参考値）
-REPO=$(gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"')
-# SHA は位置引数 $1、REPO は位置引数 $2、jq フィルタは位置引数 $3 で渡す
-# （REPO を子シェル内で "${REPO}" と展開すると非 export の変数は sh -c に渡らず空になり、
-#  gh api が必ず失敗して常に apps: [] へフォールバックする）
-gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
-  | xargs -I{} sh -c 'gh api "repos/$2/commits/$1/check-runs" --jq "$3" 2>/dev/null' \
-      _ {} "$REPO" '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' \
-  | sort -u
+# 外部チェック観測（直前 3 件の merged PR の check-runs から、GitHub Actions 以外の App slug を集める。結果は参考値）
+# Workflow の agent は、ホストが組み立てた run-verified.sh 経由の同じコマンドを実行する
+bash <skillDir>/scripts/detect-external-checks.sh
 ```
 
 実行キューと依存グラフの構築ルール:
@@ -348,7 +343,7 @@ opt-in テスト宣言がある場合、body には Closes 行に続けて「## 
 - `baseRefName` が指定 base ブランチと一致すること（同じ head から別 base（リリースブランチ等）へ開かれた PR を再利用すると、`base <branch>` の契約を迂回して意図しないブランチへマージされる）
 - `headRefOid` が push したブランチの先端 sha と一致すること（他者・別ランの push で head が動いた PR を、検証していないコミットごとマージ対象にしない）。比較対象の sha は必ずブランチ ref（`git rev-parse --verify "refs/heads/<branch>"`、解決できなければ `refs/remotes/origin/<branch>`）から解決する。PR Create エージェントは隔離 worktree で動作し、その worktree が対象ブランチを checkout している保証がないため `git rev-parse HEAD` を使ってはならない
 
-条件を満たす PR を再利用する場合は、本文に `Closes #<N>`（および対象外項目があれば「対象外（out-of-scope）」節）が無ければ追記する。このとき**既存本文をシェルコマンド文字列・HEREDOC へ埋め込んではならない**（本文は外部由来の未信頼データであり、行単独の HEREDOC 終端文字列を仕込まれると HEREDOC が早期終了して後続行が任意コマンドとして実行される）。取得・存在確認・固定の形の追記・`gh pr edit` での更新・反映の確認は同梱の `pr-body-edit.sh ensure` が行い（本文は agent のコンテキストにも入れない。対象外節はホストが組み立てた内容を agent が Write ツールでファイルに書き、スクリプトが SHA-256 を照合してから足す）、取得に失敗した本文・空の本文・Closes 行や対象外節を失う本文では更新しない（[references/script-trust-model.md](references/script-trust-model.md) の「状態ファイル・GitHub の読み取りと、agent に実行させるコマンドの形」）。条件を満たさない open PR しか存在しない場合は、再利用も新規作成も行わず `prNumber: 0` と理由を返して停止する（`branch` は保存されるため、次回実行は impl 手順 0b から回復する）。
+条件を満たす PR を再利用する場合は、本文に `Closes #<N>`（および対象外項目があれば「対象外（out-of-scope）」節）が無ければ追記する。このとき**既存本文をシェルコマンド文字列・HEREDOC へ埋め込んではならない**（本文は外部由来の未信頼データであり、行単独の HEREDOC 終端文字列を仕込まれると HEREDOC が早期終了して後続行が任意コマンドとして実行される）。取得・存在確認・固定の形の追記・`gh pr edit` での更新・反映の確認は同梱の `pr-body-edit.sh ensure` が行い（本文は agent のコンテキストにも入れない。対象外節はホストが組み立てた内容を agent が Write ツールでファイルに書き、スクリプトが SHA-256 を照合してから足す）、PR の head・base・isCrossRepository がホストの知るブランチ名・ベース名・同じリポジトリと一致しない PR（agent が番号を写し間違えた場合）・取得に失敗した本文・空の本文・Closes 行や対象外節を失う本文では更新しない（[references/script-trust-model.md](references/script-trust-model.md) の「状態ファイル・GitHub の読み取りと、agent に実行させるコマンドの形」）。条件を満たさない open PR しか存在しない場合は、再利用も新規作成も行わず `prNumber: 0` と理由を返して停止する（`branch` は保存されるため、次回実行は impl 手順 0b から回復する）。
 
 PR 作成が失敗した場合は `failed` として記録し、`branch` を保存する。`branch` 保存済みの `failed` は次回再実行時に Recover phase を起動する（impl 手順 0b には到達しない）。continue なら回復 Implement の手順 2 が既存 branch を checkout した後に `git fetch origin <branch>:refs/remotes/origin/<branch>` → `git merge --ff-only refs/remotes/origin/<branch>` でローカルをリモート tip へ追従させ、push 済みの base 取り込みコミットを保持したまま回復する（PR Create エージェントは base 取り込みコミットを detached HEAD から push しローカル `refs/heads/<branch>` を更新しないため、追従なしでは次の PR 作成が remote-ahead / diverged で再失敗する）。ff 不能な真の diverged はそのまま続行し、次の PR 作成の (iv) が fail-closed で止める。
 
@@ -365,7 +360,7 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 **監視とマージ実行の分離・merged 自己申告の独立確認:** このステップは監視・マージ実行・独立確認の 3 つのエージェントに分かれる。実行基盤がエージェント単位のツール権限制御を提供しないため、これは権限の剥奪ではなく**コンテキスト分離**（未信頼テキストをマージ実行主体へ入れない）である。残存リスクと必要な基盤対応は「非信頼データの扱い」項目 5 を参照。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
   - **観測と待機はスクリプト（`scripts/observe-pr.sh`、Issue #603 第 2 弾）**: PR の state・mergeable・チェック総数・required context の不足・外部 App のレビュー到着・未解決スレッド数は、monitor が `gh` / `jq` を組み立てずに `bash <skillDir>/scripts/run-verified.sh … observe-pr.sh --mode …` を実行し、1 行 JSON 封筒（整数と固定語彙の payload）を読む。待機（レビュー到着・required 揃い・チェック総数 0 件・CI の完了待ち `--mode checks --until settled`）の1 回の起動は、gh が遅い・ハングする場合を含めて壁時計 90 秒（`OBSERVE_PR_WALL_SEC`）+ 後始末の数秒以内に必ず返る（gh 1 回ごとに 25 秒の時間制限を付けてグループごと kill し、残り時間が 1 観測分に満たなければ次の観測を始めない。Bash ツールの既定タイムアウト 120 秒に収まる）。`pending` のたびに `--attempt` を 1 増やして同じコマンドを再実行する（最大 7 回 = およそ 10 分。CI の完了待ち `--until settled` だけは 25 秒間隔・4 観測で 1 起動およそ 83 秒、最大 30 回 = およそ 40 分で、旧 `gh pr checks --watch` の最長と同じ。回数の上限はスクリプトが強制する。エージェントが毎回自作していたループが `paste -sd+ | bc` の BSD 非互換で上限まで回り切った不具合の是正）。取得失敗は `err: 1` で返り、0 件・不足 0 に倒さない。ホストが封筒を照合して採用するのはチェック総数だけ（`checksObservation`。timeout かつ総数 0 を conflicting へ再判定する根拠）で、他の観測は monitor の助言的判定の材料にとどまる。push 直後の確認（`--mode push`。pr-create・fix のエージェントが実行）の封筒もホストは照合も採用もしない（`checksStarted` / `mergeableAfterPush` は従来どおり診断・分岐ヒント専用）。信頼モデルは [references/script-trust-model.md](references/script-trust-model.md)。
-- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、**リポジトリ内ファイル（CLAUDE.md・`.claude/rules` 等 = PR 側で変更可能な未信頼テキスト）も読まない**（実装系エージェント向けの共通指示 COMMON を挿入せず、merge-verify と同一の最小指示で構成する）。**マージ直前の検証（G0・チェック・未解決スレッド・mergeable・外部チェック）は #603 第 6 弾から `scripts/merge-gate.sh` が行う**（`gh` / `jq` の手順はプロンプトに無く、判定語 `verdict`（merge-exec の reason と同じ語彙）を封筒で返す。merge-exec は `ok` のときだけ手順 3 の squash merge に進み、ホストは `merged: true / reason: merged` の受理前に封筒を nonce・sha256・入力・HEAD sha で照合する。マージの実行そのものはスクリプトに含めず merge-exec がプロンプトのコマンド形で行う。詳細は references/script-trust-model.md の第 6 弾の節）。以下は検証の中身（スクリプトが読むもの）を指す。PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）、および `args.externalChecks` で確定した外部チェック App について HEAD sha に対する**件数と状態 enum のみ**（`--jq` で正規化。App 名・チェック名・body 等のテキストは取得しない）を自ら再取得して検証し、さらに G0 ゲート（ベースブランチのサーバー側強制の実測: required checks の bypass 不能性（ruleset の `bypass_actors` 空。classic branch protection のみのリポジトリは bypass 不能性を write トークンから証明できないため非対応 — `classic-unsupported` で辞退）・レビュースレッド解消の必須化・合格判定対象チェック context の required 化（HEAD sha 上の check-run / commit status のうち required に含まれないものが 0 件であることを jq の集合差の**件数のみ**で照合。context 文字列は取得しない）・外部チェック App の宣言 context + App ID 組（`context` + `integration_id`）束縛の required 化 + required checks 全エントリの発行元 `integration_id` 束縛（HEAD の check-run の `.app.id` と一致することの件数照合。同名 commit status 偽装の遮断 — 検証できなければ `issuer-unbound` で辞退）。件数・真偽値のみの API 出力で確認し、確認できなければ `server-enforcement-missing` で辞退）を通過した場合にのみ squash merge とイシュークローズを実行する。HEAD sha は自身の `gh pr view` 観測から取得・固定し（monitor から受け取らない）、マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <自己取得 sha>` で実行して、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
+- **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、**リポジトリ内ファイル（CLAUDE.md・`.claude/rules` 等 = PR 側で変更可能な未信頼テキスト）も読まない**（実装系エージェント向けの共通指示 COMMON を挿入せず、merge-verify と同一の最小指示で構成する）。**マージ直前の検証（G0・チェック・未解決スレッド・mergeable・外部チェック）は #603 第 6 弾から `scripts/merge-gate.sh` が行う**（`gh` / `jq` の手順はプロンプトに無く、判定語 `verdict`（merge-exec の reason と同じ語彙）を封筒で返す。merge-exec は `ok` のときだけ手順 3 の squash merge に進み、ホストは `merged: true / reason: merged` の受理前に封筒を nonce・sha256・入力・HEAD sha で照合する。マージの実行そのものはスクリプトに含めず merge-exec がプロンプトのコマンド形で行う。詳細は references/script-trust-model.md の第 6 弾の節）。以下は検証の中身（スクリプトが読むもの）を指す。PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state` の state ごとの件数。集計は `merge-gate.sh` の中で行い、gh の `--jq` に式を書かない。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）、および `args.externalChecks` で確定した外部チェック App について HEAD sha に対する**件数と状態 enum のみ**（`--jq` で正規化。App 名・チェック名・body 等のテキストは取得しない）を自ら再取得して検証し、さらに G0 ゲート（ベースブランチのサーバー側強制の実測: required checks の bypass 不能性（ruleset の `bypass_actors` 空。classic branch protection のみのリポジトリは bypass 不能性を write トークンから証明できないため非対応 — `classic-unsupported` で辞退）・レビュースレッド解消の必須化・合格判定対象チェック context の required 化（HEAD sha 上の check-run / commit status のうち required に含まれないものが 0 件であることを jq の集合差の**件数のみ**で照合。context 文字列は取得しない）・外部チェック App の宣言 context + App ID 組（`context` + `integration_id`）束縛の required 化 + required checks 全エントリの発行元 `integration_id` 束縛（HEAD の check-run の `.app.id` と一致することの件数照合。同名 commit status 偽装の遮断 — 検証できなければ `issuer-unbound` で辞退）。件数・真偽値のみの API 出力で確認し、確認できなければ `server-enforcement-missing` で辞退）を通過した場合にのみ squash merge とイシュークローズを実行する。HEAD sha は自身の `gh pr view` 観測から取得・固定し（monitor から受け取らない）、マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <自己取得 sha>` で実行して、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
   - チェック名を除外するのは、名称が PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ実行主体のコンテキストへ命令文を持ち込む経路になるため。外部チェックの**件数**（非負整数）と `.conclusion` / `.status` の**状態 enum** は任意テキストを注入できる媒体ではないため、この理由づけの対象外として `--jq` 正規化つきの取得のみを許可する。App の絞り込みは、`args` 入力時に slug 形式（英小文字・数字・ハイフン、39 文字以内）へ検証済みの値との `app.slug` 一致で行い、App 名・description・output はコンテキストへ入れない。
   - 外部チェックの再検証を監視エージェント側だけに置かないのは、未信頼テキストを読む監視の判定は「マージを試みてよい」という起動条件にすぎず、ゲートの証拠にできないため。
   - 監視の `headSha` はマージ経路の入力に使われない（診断用の記録のみ。マージ判定用の HEAD sha は merge-exec が自己取得・固定する）。opt-out・外部チェック構成が未確定のラン（`externalChecks` 未指定）・信頼済み context 未宣言のラン（slug のみの旧形式）では merge-exec は回復専用経路（allowMerge=false）で起動し、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。この限定はプロンプト解釈に任せず、マージ実行手順の文面もホスト側で分岐し、回復専用経路のプロンプトには `gh pr merge` / `--match-head-commit` を一切含めずイシュークローズ確認のみを出力する。
@@ -389,39 +384,31 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
   - `blocked` が再実行でも解消しない場合は slug の誤記、または当該 App が対象リポジトリで動作していない可能性がある。App の導入状況を確認するか、`args.externalChecks` から当該 slug を除外して再実行する。
 
 ```bash
-# HEAD sha を取得（push のたびに取り直す）
-HEAD_SHA=$(gh pr view <pr-number> --json headRefOid -q .headRefOid)
+# HEAD sha を取得（push のたびに取り直す。以下の <HEAD sha> はこの値に置き換える）
+gh pr view <pr-number> --json headRefOid -q .headRefOid
 
 # CI の完了待ち（monitor が run-verified.sh 経由で実行する。--attempt を 1 から最大 30 回まで増やして再実行 = およそ 40 分）
 bash "<skillDir>/scripts/run-verified.sh" <sha256> observe-pr.sh --nonce <nonce> --mode checks --pr <pr-number> --until settled --wait --attempt 1
 # 封筒の payload: passed / pending / failed / total。pending が 0 件で met。failed が 0 件、pending が 0 件であること
 
-# Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する（cursor 確定時のみ）
-# commit_id が HEAD_SHA と一致するレビューを探す（30 件超のレビューを取りこぼさないよう --paginate 必須）
-gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
-  --jq "[.[] | select(.user.login == \"cursor[bot]\" and .commit_id == \"${HEAD_SHA}\")] | length"
-# → 合計が 0 の場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
+# 外部チェック App の観測も observe-pr.sh が行う（--mode reviews。monitor が run-verified.sh 経由で実行する）。
+# 全ページを束ねて、<slug>[bot] の HEAD sha に対するレビュー件数と、その App の check-run の状態別件数を封筒で返す。
+# レビュー本文・チェック名は出さない。取得の失敗は err: 1（0 件と区別する）
+
+# Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する（cursor 確定時のみ。--until review）
+bash "<skillDir>/scripts/run-verified.sh" <sha256> observe-pr.sh --nonce <nonce> --mode reviews --pr <pr-number> --slug cursor --until review --wait --attempt 1
+# → レビューが 0 件の場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
 # → 待機上限を超えても到着しない場合は blocked で停止する（「レビューなし」として先へ進まない）
 
-# cursor 以外の外部チェック App（例: sonarcloud）が HEAD sha に対して起動しているかを確認する
-# commits/<sha>/check-runs は sha でスコープ済みのため jq 側で sha 比較は不要
-gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs" \
-  --jq '[.check_runs[] | select(.app.slug == "sonarcloud") | (.conclusion // .status)] | group_by(.) | map({v: .[0], count: length})'
-# → 出力は状態 enum ごとの件数のみ（チェック名・description は取得しない）
-# → 全ページの count 合計が 0 なら未起動。最大 10 分待って再確認し、なお 0 なら blocked で停止する
-# → 0 件のときは <slug>[bot] レビューをフォールバックとして確認する（state 別件数のみ取得する）
-gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
-  --jq "[.[] | select(.user.login == \"sonarcloud[bot]\" and .commit_id == \"${HEAD_SHA}\") | .state] | group_by(.) | map({v: .[0], count: length})"
-# → 合格にできるのは APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が
-#   0 件の場合のみ。否定的レビューが APPROVED と併存する場合も不合格（fail-closed）
+# cursor 以外の外部チェック App（例: sonarcloud）が HEAD sha に対して起動しているかを確認する（--until started）
+bash "<skillDir>/scripts/run-verified.sh" <sha256> observe-pr.sh --nonce <nonce> --mode reviews --pr <pr-number> --slug sonarcloud --until started --wait --attempt 1
+# → 出力は件数と状態 enum ごとの件数のみ（チェック名・description は取得しない）
+# → check-run もレビューも 0 件なら未起動。最大 10 分待って再確認し、なお 0 なら blocked で停止する
+# → check-run が 0 件のときは <slug>[bot] レビューをフォールバックとして確認する。合格にできるのは APPROVED が 1 件以上かつ
+#   CHANGES_REQUESTED / COMMENTED / PENDING が 0 件の場合のみ。否定的レビューが APPROVED と併存する場合も不合格（fail-closed）
 
-# マージ実行エージェント側の再検証も本文を読まず「件数・状態 enum」のみへ正規化して取得する
-# （確定済み App ごとに実行する。合格の根拠が 1 件もなければ external-review-missing でマージしない）
-gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
-  --jq '[.[] | select(.user.login == "cursor[bot]" and .commit_id == "<検証した HEAD sha>")] | length'
-gh api --paginate "repos/{owner}/{repo}/commits/<検証した HEAD sha>/check-runs" \
-  --jq '[.check_runs[] | select(.app.slug == "sonarcloud") | (.conclusion // .status)] | group_by(.) | map({v: .[0], count: length})'
-# → --jq はページごとに適用されるため出力はページ数ぶんになる。全ページを合計して判定する
+# マージ実行エージェント側の再検証は merge-gate.sh が、本文を読まず「件数・状態 enum」のみへ正規化して取得する
+# （確定済み App ごとに、検証した HEAD sha で行う。合格の根拠が 1 件もなければ external-review-missing でマージしない）
 
 # レビュースレッドの解決確認（GraphQL）— 100 件超はページネーションで全件取得する
 # after: $cursor を使い pageInfo.hasNextPage が false になるまでループする
@@ -446,10 +433,13 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 
 - **フローから観測できる症状**（自動検知は存在しないため、実装されていない挙動は書かない）: `gh pr checks` は全 pass、`mergeable` は `MERGEABLE`、コンフリクトも未解決スレッドもないのに、merge-exec が進まず再監視が繰り返され監視予算だけが減る。この状態では `mergeStateStatus` が `BLOCKED` のまま動かない。**`mergeStateStatus` は現在どのエージェントも取得していない**ため、運用者が `gh pr view <N> --json mergeStateStatus` で確認する。
 - **原因**: 同一 head sha に対し concurrency で複数 run が走ると、cancel された run が失敗結論の check run を残す。`gh pr checks` は同名 check の最新のみを表示するため全 pass に見えるが、branch protection の required check 判定は残存 check を拾って BLOCKED になる。同一の変更を多数のリポジトリへ同時投入する運用（後述「一斉同期・大量 PR 投入時の運用ガード」）では concurrency 競合の発生頻度が上がるため、この状態に遭遇しやすい。
-- **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**:
+- **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**: (A)・(B) はどちらも複数の文からなるため、1 行ずつ Bash に渡さず、ファイルに書いて `bash <file>` で実行する（`if` / `{ ...; }` / `--jq` の複合式を含む 1 回の Bash 呼び出しは、利用側の hook に拒否されうる）。
 
+<!-- command-shape: script-file -->
 ```bash
 # (A) エージェントが実行してよい形。取得成否を先に確定してから「件数」のみを返す。
+# ファイルに書いて bash <file> で実行する。先頭で HEAD_SHA に検証した HEAD sha を代入する
+HEAD_SHA='<HEAD sha>'
 # gh api は HTTP エラーの JSON 本文も stdout へ出す仕様のため、パイプ直結だと認証失敗・404・
 # レート制限の出力が uniq -d にヒットせず「重複なし（0）」に化ける
 # （対象リポジトリに .claude/rules/ruleset-policy.md があれば手順 B と同じ罠として記載されている）。
@@ -506,8 +496,9 @@ fi
 #    出力も判定不能として扱う
 ```
 
+<!-- command-shape: script-file -->
 ```bash
-# (B) 人間の診断専用。重複の内訳をチェック名つきで確認する
+# (B) 人間の診断専用。重複の内訳をチェック名つきで確認する（ファイルに書いて bash <file> で実行する）
 # チェック名は PR 側の workflow / job 定義から生成される未信頼テキストのため、
 # monitor / merge-exec のコンテキストでは実行しない（権限境界の維持）
 # 前提: 外部の `jq` CLI が必要（`gh --jq` はページ単位適用のためここでは使えない）。
@@ -545,14 +536,13 @@ gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=10
 
 ```bash
 # cancelled な run を head sha で列挙する（conclusion=cancelled のみに絞る）
-gh api --paginate "repos/OWNER/REPO/actions/runs?head_sha=<sha>&per_page=100" \
-  --jq '.workflow_runs[] | select(.conclusion == "cancelled") | .id'
+# （gh の --jq に式を書かず、同梱の .jq ファイルへパイプする。--paginate のページごとに同じ式が当たる）
+gh api --paginate "repos/OWNER/REPO/actions/runs?head_sha=<sha>&per_page=100" | jq -r -f <skillDir>/scripts/jq/cancelled-run-ids.jq
 
 # 各 cancelled run が発行した job 名を確認し、(B) で特定した重複 check 名と突き合わせる
 # （check-run の名前は `<job名>` または `<job名> / <ステップ>` 形式で job に対応するため、
 # jobs API の name で同定できる。複数 run の job 名が同じ重複 check 名にヒットする場合は一意化不可）
-gh api --paginate "repos/OWNER/REPO/actions/runs/<cancelled-run-id>/jobs?per_page=100" \
-  --jq '.jobs[].name'
+gh api --paginate "repos/OWNER/REPO/actions/runs/<cancelled-run-id>/jobs?per_page=100" | jq -r -f <skillDir>/scripts/jq/job-names.jq
 
 # 一意に対応付けられた run に限り、全 job を回して残存 check を上書きする（--failed は付けない）
 gh run rerun <run-id> -R OWNER/REPO
@@ -581,8 +571,7 @@ CI 失敗・外部チェック指摘・未解決レビュースレッドがあ�
 ```bash
 # 1. 子孫の最下層まで open が無いか確認（--paginate で 100 件超も全ページ自動取得。
 #    total > 0 の子ごとに同じ呼び出しを繰り返す。全体を辿る場合は scripts/preview-tree.sh を使う）
-gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100" \
-  --jq '.[] | {number, state, total: .sub_issues_summary.total}'
+gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100" | jq -c -f <skillDir>/scripts/jq/sub-issues-summary.jq
 
 # 2. 受入基準・チェックリストを読む
 gh issue view <parent-number>
@@ -628,7 +617,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | 仕様準拠を確認せずにコード品質レビューへ移行する | Step 5 のレビューは①仕様準拠→②コード品質の順に実施する |
 | Review 前に push・PR 作成を行う | push・PR 作成は Review 全通過後の Step 5.5 で行う。Review 失敗時に CI を起動させないための設計 |
 | Review fix で push してしまう | Review ループの fix はローカルコミットのみ。push は Step 5.5 のみで行う |
-| 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`cat _/issue-trees/<N>.json` で確認してから再実行する |
+| 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`_/issue-trees/<N>.json` をファイルを読むツール（Read）で開いて確認してから再実行する（`cat` で読まない） |
 | 中断後に手動で worktree を削除してから再実行する | 再実行時に Recover phase が自動処理するため手動削除は不要。手動削除してしまうと Recover が残骸なしと判定し、中断前の作業を引き継がずに Plan から新規実行する |
 | fix 以外のエージェントがレビュースレッドを resolve する / fix が対象外スレッドまで resolve する | resolve mutation を実行してよいのは Merge ループの fix（push する版）だけで、対象はリモート head に反映済みの修正（(a) push 成功直後は自分が修正対応したスレッド、(b) push なしラウンドはホストが決定的に算出した許可リストのみ。fix 自身の申告 sha・自前の反映確認は不使用。(b) は現在恒久的に空リスト = 不成立）に限る。monitor / merge-exec / merge-verify / Review ループの fix は実行しない。対象外（out-of-scope）スレッドは resolve せず記録までで停止し、人間が resolve しない限り blocked → 最終レポートへ |
 | 実装コミットの scope にイシュー番号を置く（例: `feat` の scope に `42` を入れる） | `scope-enum` を持つリポでは commitlint が必ず落ちる。Review 3 巡を消費した後の push で初めて検出され、`--no-verify` は禁止のため回避もできない。scope はモジュール・ディレクトリ名にするか省略し、イシューの紐付けは `Refs #<N>` / `Closes #<N>` で行う |
@@ -648,7 +637,7 @@ open のサブイシューが残っている場合、または受入基準が未
 |------|------|------|
 | 並列負荷による OOM | リンク中に `ld terminated with signal 9 [Killed]` | runner のメモリ逼迫が原因のため、混雑中に rerun しても同じ結果になる。キューが空くまで待つ |
 | 新規 CI 導入リポのラベル不足 | CI を新規導入したリポでは `dependencies` / `automated` ラベルが無く `gh pr create --label` が exit 1 になり、PR がそもそも作られない | 投入前にラベルを作成する |
-| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 --jq '.[0].databaseId'` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs --jq '.jobs[] | select(.name == "<job名>") | .conclusion'` で同一 job 名の conclusion が `success` であることを実測する。推測で flaky 扱いにしない |
+| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 \| jq -r -f <skillDir>/scripts/jq/first-run-id.jq` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs \| jq -r --arg job '<job名>' -f <skillDir>/scripts/jq/job-conclusion.jq` で同一 job 名の conclusion が `success` であることを実測する（gh の `--jq` に `{`・`[`・`\|` を含む式を書かない）。推測で flaky 扱いにしない |
 
 **推奨投入単位**: 1 バッチあたり 5 リポジトリ以下に分割し、前バッチの run がすべて完了（`gh run list` で `in_progress` / `queued` が 0）してから次バッチを投入する（バッチ数は `ceil(対象リポジトリ数 / 5)` で導出する）。これは「注意事項」にある `parallel` の並列度指針（並列度を上げるほど CI キューが逼迫する）のリポジトリ横断版にあたる。
 

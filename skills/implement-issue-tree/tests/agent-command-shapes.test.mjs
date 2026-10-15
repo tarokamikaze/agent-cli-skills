@@ -178,6 +178,18 @@ test('同梱スクリプト・単独のコマンドへ移した箇所が、マ�
   }
 })
 
+test('再利用 PR の本文の補正は、ブランチ名・ベース名を URL エンコードして渡す。コミットの前に一時ファイルの除外設定を起動させる（Issue #18・#21）', () => {
+  const all = collected.recorded.join('\n')
+  // スクリプトが PR の head・base・isCrossRepository と照合する
+  assert.match(all, / pr-body-edit\.sh (--repo \S+ )?ensure <番号> 5 feat%2F5-x main --oos /, 'PR 作成の手順 1c（対象外節あり）')
+  assert.match(all, / pr-body-edit\.sh (--repo \S+ )?ensure <番号> 6 feat%2F5-x release%2Fv1\.2/, 'PR 作成の手順 1c（ベースブランチに / を含む）')
+  assert.ok(collected.recorded.some((c) => / worktree-exclude\.sh$/.test(c)), 'コミットの前の一時ファイルの除外設定（引数なし）')
+  // 起動時のハッシュ予検査（--verify-only のヒアドキュメントに全スクリプト名が並ぶ）は除き、起動するコマンドだけを見る
+  for (const c of collected.recorded.filter((x) => / pr-body-edit\.sh | worktree-exclude\.sh$/.test(x) && !x.includes('--verify-only'))) {
+    assert.doesNotMatch(c.replace(/^bash '[^']+'/, ''), /["'{}]/, `引数に引用符・{} を含めない: ${c}`)
+  }
+})
+
 test('merge-exec のマージは変数の代入・引用符・連結なしの単独の gh pr merge 1 本', () => {
   assert.ok(collected.recorded.includes('gh pr merge 1005 --squash --delete-branch --match-head-commit <HEAD sha>'), 'sha を値で埋め込む単独のコマンド')
   for (const c of collected.recorded.filter((x) => x.includes('gh pr merge'))) {

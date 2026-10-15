@@ -1359,6 +1359,14 @@ const COMMON=COMMON_LINES.join('\n')
 
 
 const WRITTEN_FILE_COMMIT_GUARD='   git add の前に、作業ツリーのルートに .implement-issue-tree-*.md（Write ツールで書く一時ファイル。同梱スクリプトが読んで消すが、スクリプトを起動できなかったときは残る）があれば、rm -f -- .implement-issue-tree-*.md を単独で実行して消す（コミットに含めない）。'
+
+
+
+
+
+function tempFileExcludeLine(){
+return`   git add の前に ${scriptCommand('worktree-exclude.sh')} を実行し、一時ファイル（.implement-issue-tree-*.md と、状態ファイルの隣の .input-*.json）を git の除外設定に載せる（OK と出なければ summary に「一時ファイルの除外設定に失敗」と書いて続ける）。`
+}
 const commitlintCheckInstruction=`   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選ぶ。always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う（先頭だけを見て諦めない）。never で全て拒否されたら change → update の順で拒否リストに無いものを使う。いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し（変更内容に最も近いものを優先。判断できなければ先頭から）、該当する列挙値が 1 つも無ければ scope を決定できないとして fail-closed にする（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が未設定 / never の場合に限り、同ブランチで既に hook を通過した直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値（同様に検証）の順で決める。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。\n${WRITTEN_FILE_COMMIT_GUARD}`
 
 
@@ -1388,7 +1396,7 @@ const PR_PUSH_NOTE='標準出力の最後の行 PR_PUSH_RESULT {json} の status
 function basePrepareInstruction(origin,branch,failTail){
 const cmd=prPushBlock(` --mode prepare --origin ${origin} --branch ${branch} --base ${baseBranch}${repoArg ? ` --repo ${repoArg}` : ''}`)
 const rules=subjectDecisionRules('コミットも再実行もせず',failTail)
-return`次のコマンドを実行する（一字一句そのまま。fetch・checkout・merge を自分で組み立てない。base と対象ブランチの取得、起点の実体の確認、base の取り込みをスクリプトが行う）:\n${cmd}\n${PR_PUSH_NOTE}status が merged（取り込んだ）・up-to-date（取り込む差分なし）なら次へ進む。conflict はマージが途中のまま残っている: CLAUDE.md・rules を遵守して解消し、テスト実行規約に従いビルド・lint・テストを通してから（${WRITTEN_FILE_COMMIT_GUARD.trim().replace(/。$/, '')}）git add する。コミットの subject は次の規則で決める（${rules}）。決めた subject は Write ツール等でファイル内容として一時ファイルへ書き（シェルの引数にしない。未信頼値をシェル構文へ再展開するとコマンドインジェクションになる）、git commit -F <そのファイル> で確定する。解消不能、またはこのコミットが hook に拒否された（非 0）なら git merge --abort し、--no-verify で強行せず「base コンフリクト解消不能」または「base merge コミット拒否: <hook 出力の要旨>」を理由として ${failTail}。hook-rejected は abort 済み: 同じ規則で決めた subject を同じ要領でファイルへ書き、コマンドの末尾に --subject-file <そのファイルの絶対パス> を足して 1 回だけ再実行する（再実行でも hook-rejected なら「base merge コミット拒否」を理由として ${failTail}）。それ以外の status（routing-error・dirty-worktree・base-fetch-failed・branch-fetch-failed・local-missing・remote-ahead・diverged・checkout-failed・sha-mismatch・no-own-commits・merge-failed・error）は先へ進めず、status（remote-ahead・diverged は localSha・remoteSha も）を理由として ${failTail}（fail-closed。コンフリクトのまま・base 未取り込みのまま push してはならない）。`
+return`次のコマンドを実行する（一字一句そのまま。fetch・checkout・merge を自分で組み立てない。base と対象ブランチの取得、起点の実体の確認、base の取り込みをスクリプトが行う）:\n${cmd}\n${PR_PUSH_NOTE}status が merged（取り込んだ）・up-to-date（取り込む差分なし）なら次へ進む。conflict はマージが途中のまま残っている: CLAUDE.md・rules を遵守して解消し、テスト実行規約に従いビルド・lint・テストを通してから（${tempFileExcludeLine().trim().replace(/。$/, '')}。${WRITTEN_FILE_COMMIT_GUARD.trim().replace(/。$/, '')}）git add する。コミットの subject は次の規則で決める（${rules}）。決めた subject は Write ツール等でファイル内容として一時ファイルへ書き（シェルの引数にしない。未信頼値をシェル構文へ再展開するとコマンドインジェクションになる）、git commit -F <そのファイル> で確定する。解消不能、またはこのコミットが hook に拒否された（非 0）なら git merge --abort し、--no-verify で強行せず「base コンフリクト解消不能」または「base merge コミット拒否: <hook 出力の要旨>」を理由として ${failTail}。hook-rejected は abort 済み: 同じ規則で決めた subject を同じ要領でファイルへ書き、コマンドの末尾に --subject-file <そのファイルの絶対パス> を足して 1 回だけ再実行する（再実行でも hook-rejected なら「base merge コミット拒否」を理由として ${failTail}）。それ以外の status（routing-error・dirty-worktree・base-fetch-failed・branch-fetch-failed・local-missing・remote-ahead・diverged・checkout-failed・sha-mismatch・no-own-commits・merge-failed・error）は先へ進めず、status（remote-ahead・diverged は localSha・remoteSha も）を理由として ${failTail}（fail-closed。コンフリクトのまま・base 未取り込みのまま push してはならない）。`
 }
 
 
@@ -3945,31 +3953,33 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'a345377b3683fe0719b55930e23f9bb0ad302eac1198132835810d0068873f45',
-'measure-free-disk.sh':'f425b70c40ba150de7e0a08c831576715eb78b8f8c71e3cad536eaac9ceaa02a',
-'observe-pr.sh':'5f16771f23eb9f828d4bed69e65b5d64237a54f477b0738884cb12a08e84c694',
-'base-merge.sh':'439cb5a5ee94d24c0ea256a82a5e1523f682f6a2eec00fb6bf6a70030d80bb7f',
-'pr-push.sh':'2cdb5dedbf9da5793f69aa5573e1f19d2e102c3dc48c08340324e14e008234a5',
-'state.sh':'bc8775729de11cd52098673a60a874a2ad42bdd737f9194312e94b0d25371639',
-'merge-gate.sh':'faf002595c6079f2f6205f8eaa05bf5680abaf1cda02dd7178e6d0e2f7237291',
-'worktree-remove.sh':'4fc8299d0d73b43be6d3bf476ffe7c5ddb01a6155c570c20dfe094ae5fc72d7e',
-'recover-prep.sh':'dfa8db8698efa24ff6bcf5fb10b73168cf93b9374fff8bf6d81419099cd8cf72',
+'measure-residual-bytes.sh':'a96b5403c9edf0f6e573bdb9e6c1f89a8938563dabaa567a1eb49feeaadbd487',
+'measure-free-disk.sh':'9436f24ff5f9904eb34ded3c725409dbcd2128b55e8e6ab22c0beec289b0744c',
+'observe-pr.sh':'6322ba3ccef6ca3ebb95d5c8d5f9686c7e4e1079498f31d72de09872561f2ff2',
+'base-merge.sh':'8a4276c7c3b8a250190eca56df22e8ffccc67b239c7bad66eeb0ec46e2abc67f',
+'pr-push.sh':'455e6de367218eaa9b92e5b22d79975aa5f2adec04747fb20ac1a260fdf3460f',
+'state.sh':'122057a6ca07e97c4a18b6d3e46467a6a7bf6273761c31d2a80e462ff23ed1a4',
+'merge-gate.sh':'072b30d25f3548619cff32388ab08975d0e97662e4d91feeb378b67b0f6f55ff',
+'worktree-remove.sh':'2057d9ee6763f1704fff3d0ac88d006cf073b82697131df52ba39f8120fa45c6',
+'recover-prep.sh':'9b030d7ee9a2c2de6b9aee4a9250f6ed9db0ca9b45f81577c0aad2cf4d234f2e',
 
 
 
-'state-read.sh':'37c7a8ba06eb46ab545908f5454a2f87fcf9106a28393f91644e8b1c37ddae52',
-'state-verify.sh':'8bfcd753a799951fdb4c5897cfa9896b74af2fec3f2f3c13ef1f94e2bbfcb72d',
-'fetch-tree.sh':'de83d3a972da779dfd8fb397bc69729973a97cd5feed295a9ce3b8b9ddccc462',
-'fetch-root-ancestors.sh':'dbf88209cee9b5839be41ab58e2583f4d5864641e8d49104868b16497cd55528',
-'probe-declared-deps.sh':'c4b4655acdfba1af551ea70805a5134d477833a621fee95caef25eac1cf51cd2',
-'probe-prereqs.sh':'0ea70ffa129ed20f00dde234669ab9413b14dea34013a5ff1f1d7e95cba95b52',
-'detect-external-checks.sh':'8092504469fed6cc9dccca76c5f4017df2bd15d3c5f6ce6a80315c8de1685910',
-'nonce-seed.sh':'772c26748d2b3eb9162d16134a68240c23a9304d97f93ce86034edfa97361736',
-'compare-files.sh':'96be8ee2552a76b0f2fc0ed63beaa1496a25c18e03b9eebe457643f4d1f0997e',
+'state-read.sh':'0d5a5438dd7b3743126c472444ce867c9231b1ee7c8df006a09f28961479eda1',
+'state-verify.sh':'e7c691c3294b693f79c1016bbad9b4cf1e2ccbfb7207bfc43e445d68d77168fa',
+'fetch-tree.sh':'6ab0898e5dadeb35946d3c773d7fae8783fa1e3f6f2e4a7da32efd24f5fe8b5e',
+'fetch-root-ancestors.sh':'e96e2267f74f145e11f4715091cade84fbda9836051f0905becb4951e46e7877',
+'probe-declared-deps.sh':'3d48081e129b1242ef63604bff7a89460a4d3b86496fc90a85351252cc342d95',
+'probe-prereqs.sh':'12054ffdb7ed0617535251546b8185736a93dc3a30ecda488efdedf6535282c0',
+'detect-external-checks.sh':'23baef1fe555d0418e64912f66410d8edfdb221b0a9c3c7a09f888b3e7993afc',
+'nonce-seed.sh':'6101713ace8ca34a93c7b7dc78a8ab1f8c1a1c648b66fcf939c31afe82fa573b',
+'compare-files.sh':'c0b58e7d4188d41f36634aa4599d21a0dd4ca67f2b75cffcaaef434f03dbbd63',
 
-'pr-body-edit.sh':'fa3d6867bc1c789786731576bea14296294cfdbece8934498343d8c0f252e463',
-'optin-record-count.sh':'16a779a0425ddc164ac70642830807bdca2bef9c9da52cceb5f1176d7ac4a396',
-'pr-comment.sh':'e9a57d3244868435870a528b2e4e6cb8c81bcbf496a51965e7aeb865db6f1a9c',
+'pr-body-edit.sh':'8a64e143577fe2ed75f0d6e53e3bbe59e44276262c87b951b081e87e47f8f375',
+'optin-record-count.sh':'420900441c9d0cdb6c0109061edba45141c2a501002d3df94b710b21a87ef761',
+'pr-comment.sh':'8abed629ccb306104a4672615a6bbf49e3afcf599f8f985fc25c04cb04754930',
+
+'worktree-exclude.sh':'c9e1c6fedb0b68e51d00ea23ddd6826353e06f229c54c34060a46e9433a3c778',
 }
 
 
@@ -5443,6 +5453,7 @@ IMPL_STEP4,
 ...optinTestExecutionLines(item,'4b'),
 IMPL_STEP5,
 IMPL_STEP6,
+tempFileExcludeLine(),
 commitlintCheckInstruction,
 
 '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
@@ -5893,9 +5904,11 @@ prPushBlock(` --mode pr --branch ${branch} --base ${baseBranch} --title-file <�
 
 
 
-`1c. （1b が reused を返したときのみ）既存本文を補正する: 「Closes #${item.number}」が無ければ追記する（マージ時にイシューが自動クローズされないと監視が空転するため必ず存在させる）${outOfScopeItems.length ? '。「## 対象外（out-of-scope）」節が無ければ追記する（対象外項目は最終レポートの issue 化判断の材料であり、再利用経路でも失われてはならない）' : ''}${optinRecordSection ? '。opt-in テスト記録節を今回の結果へ書き直す' : ''}。1b の結果の milestone が unassigned なら milestone の警告の行を（無ければ）足す。既存本文は読まない（取得・補正・1 回の gh pr edit・反映の確認はスクリプトが行い、取得に失敗した本文・空の本文・Closes 行や対象外節を失う本文では更新しない）。`,
+
+
+`1c. （1b が reused を返したときのみ）既存本文を補正する: 「Closes #${item.number}」が無ければ追記する（マージ時にイシューが自動クローズされないと監視が空転するため必ず存在させる）${outOfScopeItems.length ? '。「## 対象外（out-of-scope）」節が無ければ追記する（対象外項目は最終レポートの issue 化判断の材料であり、再利用経路でも失われてはならない）' : ''}${optinRecordSection ? '。opt-in テスト記録節を今回の結果へ書き直す' : ''}。1b の結果の milestone が unassigned なら milestone の警告の行を（無ければ）足す。既存本文は読まない（取得・補正・1 回の gh pr edit・反映の確認はスクリプトが行い、PR の head・base が ${branch}・${baseBranch} と一致しない PR・別リポジトリ（fork）からの PR、取得に失敗した本文・空の本文・Closes 行や対象外節を失う本文では更新しない）。`,
 ...(outOfScopeItems.length?[`   a. ${writtenFileLines(oosNonce, '対象外節', oosText).join('\n')}`]:[]),
-`   ${outOfScopeItems.length ? 'b. ' : ''}次を実行する（<番号> は再利用する PR の番号。1b の結果の milestone が unassigned のときだけ、<番号> ${item.number} の直後に --milestone-warning を足す）: ${scriptCommand('pr-body-edit.sh', `${prWriteRepo()} ensure <番号> ${item.number}${outOfScopeItems.length ? ` --oos ${oosNonce} ${writtenSha256(oosNonce, item.number, oosText)}` : ''}${optinRecordSection ? ` --optin${optinRecordArgs(item.optinTests)}` : ''}`)}`,
+`   ${outOfScopeItems.length ? 'b. ' : ''}次を実行する（<番号> は再利用する PR の番号。1b の結果の milestone が unassigned のときだけ、${item.number} ${encodeURIComponent(branch)} ${encodeURIComponent(baseBranch)} の直後に --milestone-warning を足す）: ${scriptCommand('pr-body-edit.sh', `${prWriteRepo()} ensure <番号> ${item.number} ${encodeURIComponent(branch)} ${encodeURIComponent(baseBranch)}${outOfScopeItems.length ? ` --oos ${oosNonce} ${writtenSha256(oosNonce, item.number, oosText)}` : ''}${optinRecordSection ? ` --optin${optinRecordArgs(item.optinTests)}` : ''}`)}`,
 ...(optinRecordSection
 ?[optinRecordArgsNote('手順 0b2 で控えた期待 SHA（手順 0d で HEAD との一致を確認済み。省略・短縮しない）','手順 0c の各コマンドの結果 pass / fail / not-run')]
 :[]),
@@ -6003,10 +6016,12 @@ const commitAndPushInstructions=pushAfterFix
 
 
 `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。${fixPushInstruction(branch)} ${postPushChecksInstruction(impl.prNumber, branch)}`,
+tempFileExcludeLine(),
 commitlintCheckInstruction,
 ]
 :[
 `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
+tempFileExcludeLine(),
 commitlintCheckInstruction,
 
 
@@ -6246,6 +6261,7 @@ IMPL_STEP4,
 ...optinTestExecutionLines(item,'4b'),
 IMPL_STEP5,
 IMPL_STEP6,
+tempFileExcludeLine(),
 commitlintCheckInstruction,
 '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
 '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',

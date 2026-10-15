@@ -15,8 +15,8 @@ bash skills/implement-issue-tree/scripts/preview-tree.sh <parent>
 
 # 手動で確認する場合: 直下を取得し、sub_issues_summary.total > 0 の子について同じ呼び出しを繰り返す
 # （closed の子も辿る。total が 0 のノードだけが leaf）
-gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100" \
-  --jq '.[] | {number: .number, state: .state, total: .sub_issues_summary.total}'
+# （gh の --jq に式を書かず、同梱の .jq ファイルへパイプする）
+gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100" | jq -c -f skills/implement-issue-tree/scripts/jq/sub-issues-summary.jq
 ```
 
 Workflow の返却値（`done`・`failures`・`notStarted`）を確認し、`failures` と `notStarted` が空であることを確認する。
