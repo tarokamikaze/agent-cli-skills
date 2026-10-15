@@ -10,7 +10,7 @@
 #   st_valid_entries  init の入力（[{"number":正の整数,"type":"implement"|"verify-close"}...]）の形
 #   st_rewrite        状態ファイルを jq で書き換える（スナップショットから計算 → 書き込み直前に変更なしを確認 → mv。
 #                     変更を検知したら最初からやり直し、3 回で諦める）
-#   ST_MERGE_JQ / ST_INIT_JQ / ST_HW_MAX_JQ / ST_HW_SET_JQ  書き換えの jq プログラム（固定。外部入力は --slurpfile / --argjson で渡す）
+#   ST_MERGE_JQ / ST_INIT_JQ / ST_HW_MAX_JQ / ST_HW_SET_JQ / ST_CLEAR_WORKTREE_JQ  書き換えの jq プログラム（固定。外部入力は --slurpfile / --argjson で渡す）
 # 契約: 外部入力（patch の自由文を含む）は jq のプログラム文字列に埋め込まない。書き換えはファイルの同じディレクトリに
 #       作った一時ファイルへ出力してから mv する（部分書き込みを残さない）。.items がオブジェクトでないファイルは書き換えない
 #       （壊れた状態の上へ書き足さない）。st_rewrite の戻り値: 0 成功 / 1 入力の形・jq の失敗 / 2 ファイルが無い / 3 一時ファイル
@@ -31,6 +31,8 @@ ST_INIT_JQ='reduce $entries[0][] as $e (.; if .items[($e.number|tostring)] == nu
 ST_HW_MAX_JQ='if ((.perWorktreeByteReserveHighWaterVersion // 0) != $v) or ((.perWorktreeByteReserveHighWater // 0) < $hw) then .perWorktreeByteReserveHighWater = $hw | .perWorktreeByteReserveHighWaterVersion = $v else . end | .updatedAt = $ts'
 # 高水位: 無条件で上書き（引き下げ・旧版の無効化）
 ST_HW_SET_JQ='.perWorktreeByteReserveHighWater = $hw | .perWorktreeByteReserveHighWaterVersion = $v | .updatedAt = $ts'
+# worktree の掃除のあと: .items["<番号>"].worktree を空にする（項目が無ければ作る）
+ST_CLEAR_WORKTREE_JQ='.items[$n] = ((.items[$n] // {}) + {"worktree": ""}) | .updatedAt = $ts'
 
 st_valid_file() {
   local n
