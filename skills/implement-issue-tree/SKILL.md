@@ -178,15 +178,9 @@ gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100"
 # 各 open イシューの本文を読み、機能的依存を抽出
 gh issue view <N>
 
-# 外部チェック観測（直前 3 件の merged PR の check-runs を確認。結果は参考値）
-REPO=$(gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"')
-# SHA は位置引数 $1、REPO は位置引数 $2、jq フィルタは位置引数 $3 で渡す
-# （REPO を子シェル内で "${REPO}" と展開すると非 export の変数は sh -c に渡らず空になり、
-#  gh api が必ず失敗して常に apps: [] へフォールバックする）
-gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
-  | xargs -I{} sh -c 'gh api "repos/$2/commits/$1/check-runs" --jq "$3" 2>/dev/null' \
-      _ {} "$REPO" '[.check_runs[] | select(.app.slug != "github-actions") | .app.slug] | .[]' \
-  | sort -u
+# 外部チェック観測（直前 3 件の merged PR の check-runs から、GitHub Actions 以外の App slug を集める。結果は参考値）
+# Workflow の agent は、ホストが組み立てた run-verified.sh 経由の同じコマンドを実行する
+bash <skillDir>/scripts/detect-external-checks.sh
 ```
 
 実行キューと依存グラフの構築ルール:
@@ -389,8 +383,8 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 Workflow の監視エージェントは、下の取得を同梱スクリプト（`checks-total.sh`・`external-check-runs.sh`・`required-context-missing.sh`・`unresolved-threads.sh` など）の 1 コマンドで行う（エージェントにシェルを組み立てさせない。[references/script-trust-model.md](references/script-trust-model.md) の第 3 弾）。下のブロックは、人が手で同じ確認をするときの手順である。
 
 ```bash
-# HEAD sha を取得（push のたびに取り直す）
-HEAD_SHA=$(gh pr view <pr-number> --json headRefOid -q .headRefOid)
+# HEAD sha を取得（push のたびに取り直す。以下の <HEAD sha> はこの値に置き換える）
+gh pr view <pr-number> --json headRefOid -q .headRefOid
 
 # CI 監視
 gh pr checks <pr-number> --watch --interval 60
@@ -399,32 +393,29 @@ gh pr checks <pr-number> --watch --interval 60
 # failure / cancelled / timed_out が 0 件、pending / queued / in_progress が 0 件であること
 gh pr checks <pr-number>
 
+# 以下の件数の取得は同梱スクリプトが行う（Workflow の agent は、ホストが組み立てた run-verified.sh 経由の同じコマンドを
+# 実行する）。どちらも全ページを束ねてから「<値> <件数>」の行で出し、レビュー本文・チェック名は出さない。取得の失敗は
+# 何も出さず exit 1（0 件と区別する）
+
 # Bugbot（cursor[bot]）レビューが HEAD sha に対して到着しているか確認する（cursor 確定時のみ）
-# commit_id が HEAD_SHA と一致するレビューを探す（30 件超のレビューを取りこぼさないよう --paginate 必須）
-gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
-  --jq "[.[] | select(.user.login == \"cursor[bot]\" and .commit_id == \"${HEAD_SHA}\")] | length"
-# → 合計が 0 の場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
+# commit_id が HEAD sha と一致するレビューを state ごとに数える（30 件超のレビューも全ページ取得する）
+bash <skillDir>/scripts/review-state-counts.sh <pr-number> <HEAD sha> cursor
+# → 件数の合計が 0 の場合は最大 10 分待つ（HEAD push から 1 分以上経過後に @cursor review を 1 回だけ催促可）
 # → 待機上限を超えても到着しない場合は blocked で停止する（「レビューなし」として先へ進まない）
 
 # cursor 以外の外部チェック App（例: sonarcloud）が HEAD sha に対して起動しているかを確認する
-# commits/<sha>/check-runs は sha でスコープ済みのため jq 側で sha 比較は不要
-gh api --paginate "repos/{owner}/{repo}/commits/${HEAD_SHA}/check-runs" \
-  --jq '[.check_runs[] | select(.app.slug == "sonarcloud") | (.conclusion // .status)] | group_by(.) | map({v: .[0], count: length})'
+# commits/<sha>/check-runs は sha でスコープ済みのため sha 比較は不要
+bash <skillDir>/scripts/external-check-runs.sh <HEAD sha> sonarcloud
 # → 出力は状態 enum ごとの件数のみ（チェック名・description は取得しない）
-# → 全ページの count 合計が 0 なら未起動。最大 10 分待って再確認し、なお 0 なら blocked で停止する
+# → 件数の合計が 0 なら未起動。最大 10 分待って再確認し、なお 0 なら blocked で停止する
 # → 0 件のときは <slug>[bot] レビューをフォールバックとして確認する（state 別件数のみ取得する）
-gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
-  --jq "[.[] | select(.user.login == \"sonarcloud[bot]\" and .commit_id == \"${HEAD_SHA}\") | .state] | group_by(.) | map({v: .[0], count: length})"
+bash <skillDir>/scripts/review-state-counts.sh <pr-number> <HEAD sha> sonarcloud
 # → 合格にできるのは APPROVED が 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が
 #   0 件の場合のみ。否定的レビューが APPROVED と併存する場合も不合格（fail-closed）
 
 # マージ実行エージェント側の再検証も本文を読まず「件数・状態 enum」のみへ正規化して取得する
-# （確定済み App ごとに実行する。合格の根拠が 1 件もなければ external-review-missing でマージしない）
-gh api --paginate "repos/{owner}/{repo}/pulls/<pr-number>/reviews" \
-  --jq '[.[] | select(.user.login == "cursor[bot]" and .commit_id == "<検証した HEAD sha>")] | length'
-gh api --paginate "repos/{owner}/{repo}/commits/<検証した HEAD sha>/check-runs" \
-  --jq '[.check_runs[] | select(.app.slug == "sonarcloud") | (.conclusion // .status)] | group_by(.) | map({v: .[0], count: length})'
-# → --jq はページごとに適用されるため出力はページ数ぶんになる。全ページを合計して判定する
+# （確定済み App ごとに、検証した HEAD sha で同じコマンドを実行する。合格の根拠が 1 件もなければ
+# external-review-missing でマージしない）
 
 # レビュースレッドの解決確認（GraphQL）— 100 件超はページネーションで全件取得する
 # after: $cursor を使い pageInfo.hasNextPage が false になるまでループする
@@ -449,10 +440,13 @@ gh pr merge <pr-number> --squash --delete-branch --match-head-commit <検証し�
 
 - **フローから観測できる症状**（自動検知は存在しないため、実装されていない挙動は書かない）: `gh pr checks` は全 pass、`mergeable` は `MERGEABLE`、コンフリクトも未解決スレッドもないのに、merge-exec が進まず再監視が繰り返され監視予算だけが減る。この状態では `mergeStateStatus` が `BLOCKED` のまま動かない。**`mergeStateStatus` は現在どのエージェントも取得していない**ため、運用者が `gh pr view <N> --json mergeStateStatus` で確認する。
 - **原因**: 同一 head sha に対し concurrency で複数 run が走ると、cancel された run が失敗結論の check run を残す。`gh pr checks` は同名 check の最新のみを表示するため全 pass に見えるが、branch protection の required check 判定は残存 check を拾って BLOCKED になる。同一の変更を多数のリポジトリへ同時投入する運用（後述「一斉同期・大量 PR 投入時の運用ガード」）では concurrency 競合の発生頻度が上がるため、この状態に遭遇しやすい。
-- **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**:
+- **検知コマンド（エージェントが実行してよいものと、人間の診断専用を明確に分ける）**: (A)・(B) はどちらも複数の文からなるため、1 行ずつ Bash に渡さず、ファイルに書いて `bash <file>` で実行する（`if` / `{ ...; }` / `--jq` の複合式を含む 1 回の Bash 呼び出しは、利用側の hook に拒否されうる）。
 
+<!-- command-shape: script-file -->
 ```bash
 # (A) エージェントが実行してよい形。取得成否を先に確定してから「件数」のみを返す。
+# ファイルに書いて bash <file> で実行する。先頭で HEAD_SHA に検証した HEAD sha を代入する
+HEAD_SHA='<HEAD sha>'
 # gh api は HTTP エラーの JSON 本文も stdout へ出す仕様のため、パイプ直結だと認証失敗・404・
 # レート制限の出力が uniq -d にヒットせず「重複なし（0）」に化ける
 # （対象リポジトリに .claude/rules/ruleset-policy.md があれば手順 B と同じ罠として記載されている）。
@@ -509,8 +503,9 @@ fi
 #    出力も判定不能として扱う
 ```
 
+<!-- command-shape: script-file -->
 ```bash
-# (B) 人間の診断専用。重複の内訳をチェック名つきで確認する
+# (B) 人間の診断専用。重複の内訳をチェック名つきで確認する（ファイルに書いて bash <file> で実行する）
 # チェック名は PR 側の workflow / job 定義から生成される未信頼テキストのため、
 # monitor / merge-exec のコンテキストでは実行しない（権限境界の維持）
 # 前提: 外部の `jq` CLI が必要（`gh --jq` はページ単位適用のためここでは使えない）。
@@ -548,14 +543,13 @@ gh api --paginate --slurp "repos/OWNER/REPO/commits/<sha>/check-runs?per_page=10
 
 ```bash
 # cancelled な run を head sha で列挙する（conclusion=cancelled のみに絞る）
-gh api --paginate "repos/OWNER/REPO/actions/runs?head_sha=<sha>&per_page=100" \
-  --jq '.workflow_runs[] | select(.conclusion == "cancelled") | .id'
+# （gh の --jq に式を書かず、同梱の .jq ファイルへパイプする。--paginate のページごとに同じ式が当たる）
+gh api --paginate "repos/OWNER/REPO/actions/runs?head_sha=<sha>&per_page=100" | jq -r -f <skillDir>/scripts/jq/cancelled-run-ids.jq
 
 # 各 cancelled run が発行した job 名を確認し、(B) で特定した重複 check 名と突き合わせる
 # （check-run の名前は `<job名>` または `<job名> / <ステップ>` 形式で job に対応するため、
 # jobs API の name で同定できる。複数 run の job 名が同じ重複 check 名にヒットする場合は一意化不可）
-gh api --paginate "repos/OWNER/REPO/actions/runs/<cancelled-run-id>/jobs?per_page=100" \
-  --jq '.jobs[].name'
+gh api --paginate "repos/OWNER/REPO/actions/runs/<cancelled-run-id>/jobs?per_page=100" | jq -r -f <skillDir>/scripts/jq/job-names.jq
 
 # 一意に対応付けられた run に限り、全 job を回して残存 check を上書きする（--failed は付けない）
 gh run rerun <run-id> -R OWNER/REPO
@@ -584,8 +578,7 @@ CI 失敗・外部チェック指摘・未解決レビュースレッドがあ�
 ```bash
 # 1. 子孫の最下層まで open が無いか確認（--paginate で 100 件超も全ページ自動取得。
 #    total > 0 の子ごとに同じ呼び出しを繰り返す。全体を辿る場合は scripts/preview-tree.sh を使う）
-gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100" \
-  --jq '.[] | {number, state, total: .sub_issues_summary.total}'
+gh api --paginate "repos/{owner}/{repo}/issues/<parent>/sub_issues?per_page=100" | jq -c -f <skillDir>/scripts/jq/sub-issues-summary.jq
 
 # 2. 受入基準・チェックリストを読む
 gh issue view <parent-number>
@@ -629,7 +622,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | 仕様準拠を確認せずにコード品質レビューへ移行する | Step 5 のレビューは①仕様準拠→②コード品質の順に実施する |
 | Review 前に push・PR 作成を行う | push・PR 作成は Review 全通過後の Step 5.5 で行う。Review 失敗時に CI を起動させないための設計 |
 | Review fix で push してしまう | Review ループの fix はローカルコミットのみ。push は Step 5.5 のみで行う |
-| 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`cat _/issue-trees/<N>.json` で確認してから再実行する |
+| 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`_/issue-trees/<N>.json` をファイルを読むツール（Read）で開いて確認してから再実行する（`cat` で読まない） |
 | 中断後に手動で worktree を削除してから再実行する | 再実行時に Recover phase が自動処理するため手動削除は不要。手動削除してしまうと Recover が残骸なしと判定し、中断前の作業を引き継がずに Plan から新規実行する |
 | fix 以外のエージェントがレビュースレッドを resolve する / fix が対象外スレッドまで resolve する | resolve mutation を実行してよいのは Merge ループの fix（push する版）だけで、対象はリモート head に反映済みの修正（(a) push 成功直後は自分が修正対応したスレッド、(b) push なしラウンドはホストが決定的に算出した許可リストのみ。fix 自身の申告 sha・自前の反映確認は不使用。(b) は現在恒久的に空リスト = 不成立）に限る。monitor / merge-exec / merge-verify / Review ループの fix は実行しない。対象外（out-of-scope）スレッドは resolve せず記録までで停止し、人間が resolve しない限り blocked → 最終レポートへ |
 | 実装コミットの scope にイシュー番号を置く（例: `feat` の scope に `42` を入れる） | `scope-enum` を持つリポでは commitlint が必ず落ちる。Review 3 巡を消費した後の push で初めて検出され、`--no-verify` は禁止のため回避もできない。scope はモジュール・ディレクトリ名にするか省略し、イシューの紐付けは `Refs #<N>` / `Closes #<N>` で行う |
@@ -649,7 +642,7 @@ open のサブイシューが残っている場合、または受入基準が未
 |------|------|------|
 | 並列負荷による OOM | リンク中に `ld terminated with signal 9 [Killed]` | runner のメモリ逼迫が原因のため、混雑中に rerun しても同じ結果になる。キューが空くまで待つ |
 | 新規 CI 導入リポのラベル不足 | CI を新規導入したリポでは `dependencies` / `automated` ラベルが無く `gh pr create --label` が exit 1 になり、PR がそもそも作られない | 投入前にラベルを作成する |
-| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 --jq '.[0].databaseId'` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs --jq '.jobs[] | select(.name == "<job名>") | .conclusion'` で同一 job 名の conclusion が `success` であることを実測する。推測で flaky 扱いにしない |
+| flaky の誤判定 | 差分と無関係なテストが落ちる | 「main で同じジョブが green」「差分が当該テストに影響しえない（変更パスを実測）」の 2 点を確認してから rerun する。前者は `gh run list --branch main` を単独では使わない（別 workflow の成功や skip されたジョブが紛れ込み、肝心の failing job が実は main でも失敗・未実行のまま green と誤認し得る）。失敗した PR 上の workflow ファイル名と job 名を特定したうえで、`gh run list --branch main --workflow <workflow-file> --json databaseId,conclusion --limit 1 \| jq -r -f <skillDir>/scripts/jq/first-run-id.jq` で直近 run の ID を取得し、`gh api repos/OWNER/REPO/actions/runs/<run-id>/jobs \| jq -r --arg job '<job名>' -f <skillDir>/scripts/jq/job-conclusion.jq` で同一 job 名の conclusion が `success` であることを実測する（gh の `--jq` に `{`・`[`・`\|` を含む式を書かない）。推測で flaky 扱いにしない |
 
 **推奨投入単位**: 1 バッチあたり 5 リポジトリ以下に分割し、前バッチの run がすべて完了（`gh run list` で `in_progress` / `queued` が 0）してから次バッチを投入する（バッチ数は `ceil(対象リポジトリ数 / 5)` で導出する）。これは「注意事項」にある `parallel` の並列度指針（並列度を上げるほど CI キューが逼迫する）のリポジトリ横断版にあたる。
 

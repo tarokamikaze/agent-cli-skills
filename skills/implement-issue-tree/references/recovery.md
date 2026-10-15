@@ -6,10 +6,7 @@
 
 実行中の状態は `_/issue-trees/<親イシュー番号>.json` に自動保存される。セッションが中断・強制終了した場合でも、**同じ `args` で再実行するだけで再開できる**。
 
-```bash
-# 状態ファイルの確認
-cat _/issue-trees/42.json
-```
+状態ファイルはファイルを読むツール（Read）で `_/issue-trees/42.json` を開いて確認する（`cat` で読まない。利用側の hook がファイルを読む `cat` を拒否しうるため）。
 
 状態ファイルの `status` フィールドは以下の値を取る:
 
@@ -213,8 +210,8 @@ note・ログ文言の合成にのみ使われる。
 **failed / blocked の worktree のうち Recover が discard と判定しなかったものは削除しない**（デバッグ・手動再開用に残る）。不要になった場合は状態ファイルの `worktree` フィールドを参照して手動で削除する:
 
 ```bash
-# 状態ファイルで worktree パスを確認
-cat _/issue-trees/42.json | jq '.items | to_entries[] | select(.value.status == "failed") | {issue: .key, worktree: .value.worktree}'
+# 状態ファイルで worktree パスを確認（同梱の .jq ファイルに状態ファイルを渡す。cat で読まない）
+jq -c -f <skillDir>/scripts/jq/state-failed-worktrees.jq _/issue-trees/42.json
 
 # 手動削除
 git worktree remove <worktree-path>
@@ -244,7 +241,7 @@ git -C <path> log HEAD --not --remotes --oneline || echo "確認失敗: 削除�
 
 # 3. failed / blocked のイシューが保持する worktree でないことも確認する
 #    （状態ファイルの worktree フィールドと突き合わせる）
-cat _/issue-trees/<親イシュー番号>.json | jq '.items | to_entries[] | {issue: .key, worktree: .value.worktree}'
+jq -c -f <skillDir>/scripts/jq/state-worktrees.jq _/issue-trees/<親イシュー番号>.json
 
 # 4. 手順 2 の出力が空、かつ確認コマンドが成功（終了コード 0）した場合のみ次へ進む。
 #    出力が 1 行でもある、またはコマンド自体が失敗した場合は削除しない。
@@ -292,11 +289,9 @@ jq '{hw: .perWorktreeByteReserveHighWater, v: .perWorktreeByteReserveHighWaterVe
 削除してフレッシュスタートする場合は `rm _/issue-trees/42.json` を実行する。
 ```
 
-対処方法:
-```bash
-# 状態ファイルの内容を確認する
-cat _/issue-trees/42.json
+対処方法（状態ファイルの内容は、ファイルを読むツール〔Read〕で `_/issue-trees/42.json` を開いて確認する。`cat` で読まない）:
 
+```bash
 # 修復できる場合: jq で検証・修正してから再実行
 jq . _/issue-trees/42.json
 
