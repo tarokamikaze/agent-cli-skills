@@ -195,6 +195,34 @@ for (const bash of availableBashes()) {
     })
   }
 
+  // 必須の context が実質 0 件の ruleset（ルールはあるが何も必須にしていない）は、HEAD にチェックも commit status も無くても
+  // 合格にしない。ルールが空・ページに分かれた空・パラメータ欠落・null・空文字や null の context だけの各構成で、
+  // どの段階で止まるかに関わらず verdict が ok にならないことを固定する（g0 の後の段階まで進んでも ok にしない）
+  t('g0: 必須の context が実質 0 件の構成は、HEAD にチェックが無くても ok にしない', async () => {
+    const empty = (r) => {
+      r['check-runs'] = ok([{ check_runs: [] }])
+      r.statuses = ok([[]])
+      r.prchecks = ok([])
+    }
+    const variants = [
+      ['空のルール', (r) => { r.rules = ok([[rsc(), prRule(true)]]) }],
+      ['空のルールが 2 ページ', (r) => { r.rules = ok([[rsc(), prRule(true)], [{ ...rsc(), ruleset_id: 11 }]]) }],
+      ['パラメータの欠落', (r) => { r.rules = ok([[{ type: 'required_status_checks', ruleset_id: 11, ruleset_source_type: 'Repository', parameters: {} }, prRule(true)]]) }],
+      ['required_status_checks が null', (r) => { r.rules = ok([[{ ...rsc(), parameters: { required_status_checks: null } }, prRule(true)]]) }],
+      ['context が空文字だけ', (r) => { r.rules = ok([[rsc({ context: '', integration_id: CI_APP }), prRule(true)]]) }],
+      ['context が null だけ', (r) => { r.rules = ok([[rsc({ context: null, integration_id: CI_APP }), prRule(true)]]) }],
+      ['context も integration_id も null', (r) => { r.rules = ok([[rsc({ context: null, integration_id: null }), prRule(true)]]) }],
+    ]
+    for (const [name, mutate] of variants) {
+      const routes = happy()
+      empty(routes)
+      mutate(routes)
+      const { r } = await execute(bash, routes, { external: false })
+      const p = payloadOf(r)
+      assert.notEqual(p.verdict, 'ok', `${name}: ${verdictOf(p)}`)
+    }
+  })
+
   t('external: cursor 以外の App は check-run が不合格なら APPROVED レビューが併存しても checks-not-green、check-run 0 件なら APPROVED のみで合格', async () => {
     const external = [{ app: 'sonar', contexts: ['Sonar Gate'] }]
     const base = () => {
