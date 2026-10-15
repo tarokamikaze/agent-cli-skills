@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -807,21 +807,25 @@ function applyRecordRewrite(bodyText, commands, sha, result, env) {
   return runRecordRewrite(bodyPath, commands, sha, result, env)
 }
 
+// bodyPath の内容を PR #123 の本文として偽の gh に置き、pr-body-edit.sh optin を実行する。成功したら書き戻された本文を
+// bodyPath へ写して返す。失敗（非 0）は status 3 の例外にし、bodyPath は変えない。
+// env を渡すと PATH を差し替える（/usr/bin 先頭に固定して、macOS では BSD grep〔/usr/bin/grep〕で除去を実際に走らせる
+// 確認に使う。PR #505 codex P1。偽の gh が使う jq の場所は後ろに足す）。一時ファイルはテスト専用の追跡ディレクトリに置く。
 function runRecordRewrite(bodyPath, commands, sha, result, baseEnv = process.env) {
-  // 実行行の g=$(mktemp) は、grep が非 0 で終わる経路（fail-closed）では mv されず残る。
-  // 実行行そのものは変えずに、子 bash の TMPDIR をテスト専用の追跡ディレクトリへ向けて、
-  // 残った一時ファイルがプロセス終了時にディレクトリごと消えるようにする。
   const env = { ...baseEnv, TMPDIR: trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-scratch-'))) }
-  const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
-  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -avE')).trim()
-  const hs = lines.indexOf(`cat >> "$f" <<'OPTIN_RECORD_EOF'`)
-  const he = lines.indexOf('OPTIN_RECORD_EOF', hs + 1)
-  assert.ok(hs >= 0 && he > hs, 'HEREDOC テンプレートが行頭インデントなしで見つからない')
-  const heredoc = lines.slice(hs, he + 1).join('\n')
-    .replaceAll('<sha>', sha).replaceAll('<result>', result)
-  const rm = spawnSync('bash', ['-c', `f="$1"\n${grepLine}\n`, 'bash', bodyPath], { env })
-  if (rm.status !== 0) {
-    const err = new Error(`除去実行行が終了コード ${rm.status} で失敗`)
+  const dir = dirname(bodyPath)
+  const bin = join(dir, 'bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'gh'), FAKE_GH)
+  chmodSync(join(bin, 'gh'), 0o755)
+  writeFileSync(join(dir, 'prview-123.json'), JSON.stringify({ body: readFileSync(bodyPath, 'utf8') }))
+  writeFileSync(join(dir, 'calls.log'), '')
+  const args = ['optin', '123', sha, commands.map(() => result).join(','), ...commands.map((c) => c.replaceAll(' ', '%20'))]
+  const r = spawnSync('bash', [join(SCRIPTS_DIR, 'pr-body-edit.sh'), ...args], {
+    cwd: dir, encoding: 'utf8', env: { ...env, PATH: `${bin}:${env.PATH}:${JQ_DIR}`, FAKE_GH_DIR: dir },
+  })
+  if (r.status !== 0) {
+    const err = new Error(`pr-body-edit.sh が終了コード ${r.status} で失敗: ${r.stderr}`)
     err.status = 3
     throw err
   }

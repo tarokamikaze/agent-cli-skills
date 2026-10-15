@@ -1,10 +1,11 @@
-// PR 本文・コメント・resolve の書き込みと opt-in 記録の確認のスクリプト（Issue #11 の範囲 C: scripts/pr-body-edit.sh・
-// optin-record-count.sh・pr-comment.sh・resolve-thread.sh）を、偽の gh（tests/lib/fake-gh.sh。pr edit・pr comment は
-// 書き込みを再現する）に対して実行する回帰テスト。
+// PR 本文・コメントの書き込みと opt-in 記録の確認のスクリプト（Issue #11 の範囲 C: scripts/pr-body-edit.sh・
+// optin-record-count.sh・pr-comment.sh）を、偽の gh（tests/lib/fake-gh.sh。pr edit・pr comment は
+// 書き込みを再現する）に対して実行する回帰テスト。resolve の mutation はスクリプトにしない（scripts/ の静的ガードが
+// GraphQL の mutation の綴りを禁じる）ので、fix の手順 5 は gh api graphql の 1 コマンドのまま。
 //
 // 検証する契約:
 //   - 旧プロンプトが agent に実行させていたコマンド（このファイルに固定文字列で持つ。src から消えたのでここが旧の正本）と
-//     同じ入力に対して、スクリプトが同じ結果（書き戻した PR 本文・投稿したコメント・数えた件数・送った mutation）になること
+//     同じ入力に対して、スクリプトが同じ結果（書き戻した PR 本文・投稿したコメント・数えた件数）になること
 //   - agent が Write ツールで書く自由文は、ホストが渡した SHA-256 と一致するときだけ使い、ファイルは成否に関わらず消すこと
 //   - 本文の取得の失敗・補正後が空・反映の確認の失敗では書き戻さない / 失敗を返すこと（fail-closed）
 // ホストのプロンプトから実際にコマンドと Write する内容を取り出して流す端から端までの確認も行う。
@@ -25,7 +26,7 @@ const BASHES = availableBashes()
 const FAKE_GH = readFileSync(join(HERE, 'lib', 'fake-gh.sh'), 'utf8')
 const defs = await importDefinitions([
   'lowFindingsCommentPrompt', 'prCreatePrompt', 'optinRecordMarkerLine', 'renderOptinRecordSection',
-  'statePatchSha256', 'fileNonce', 'OPTIN_RECORD_HEADING', 'OPTIN_RECORD_MARKER_PREFIX', 'OPTIN_RECORD_HUMAN_PREFIX',
+  'writtenSha256', 'fileNonce', 'OPTIN_RECORD_HEADING', 'OPTIN_RECORD_MARKER_PREFIX', 'OPTIN_RECORD_HUMAN_PREFIX',
   'ensureBoundaryNonceSeed', 'implementPrompt', 'recoverImplementPrompt', 'fixPrompt', 'WRITTEN_FILE_COMMIT_GUARD',
 ], 'write-scripts')
 // fixPrompt は境界トークンの seed を要する。seed の agent だけを stub にして入れる
@@ -69,8 +70,6 @@ const OLD = {
   ].join('\n'),
   // lowFindingsCommentPrompt（コメント本文は HEREDOC）
   comment: (pr, body) => `gh pr comment ${pr} --body "$(cat <<'LOWEOF'\n${body}\nLOWEOF\n)"`,
-  // fixPrompt 手順 5
-  resolve: (tid) => `gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=${tid}`,
 }
 
 const enc = (c) => c.replaceAll(' ', '%20')
@@ -114,8 +113,8 @@ test('lib/pr-write.sh の固定文字列はホストの OPTIN_RECORD_* と同じ
   assert.ok(lib.includes(`PW_OPTIN_HUMAN_PREFIX='${OPTIN_RECORD_HUMAN_PREFIX}'`))
 })
 
-test('ホストの照合値（statePatchSha256）と nonce（fileNonce）はスクリプトの照合の定義と同じ形', () => {
-  assert.equal(defs.statePatchSha256('n1', 42, 'x\ny'), bound('n1', 42, 'x\ny'))
+test('ホストの照合値（writtenSha256）と nonce（fileNonce）はスクリプトの照合の定義と同じ形', () => {
+  assert.equal(defs.writtenSha256('n1', 42, 'x\ny'), bound('n1', 42, 'x\ny'))
   assert.match(defs.fileNonce('a'), /^[0-9a-f]{32}$/)
   assert.notEqual(defs.fileNonce('a'), defs.fileNonce('b'))
 })
@@ -137,7 +136,7 @@ test('コミットを作る手順（Implement・recover-implement・fix・PR 作
   // PR 作成は自分でコミットを作るのが base 取り込みの解消だけなので、その git commit の手前で消させる
   const pr = defs.prCreatePrompt(item, impl, [])
   const at = pr.indexOf('rm -f -- .implement-issue-tree-*.md')
-  assert.ok(at > 0 && at < pr.indexOf('git commit --no-edit でコミットする', at), 'PR 作成の base 取り込みの解消で、git commit の前にある')
+  assert.ok(at > 0 && at < pr.indexOf('git commit -F <そのファイル>', at), 'PR 作成の base 取り込みの解消で、git commit の前にある')
   // 消す形は、Write したファイルだけを消し、ほかのファイルを残す
   const dir = mkdtempSync(join(tmpdir(), 'iit-guard-'))
   try {
@@ -189,6 +188,45 @@ for (const bash of BASHES) {
       const r = g.run(bash, 'pr-body-edit.sh', ['oos-append', '4', nonce, 'T1'])
       assert.equal(r.status, 0, `${s}: ${r.stderr}`)
       assert.ok(g.body(4).includes(line(s)), s)
+      g.done()
+    }
+  })
+
+  test(`${tag} --repo: pr-body-edit.sh・pr-comment.sh・optin-record-count.sh は gh pr の呼び出しをすべて -R で対象リポジトリへ束縛する。不正な形は exit 2`, () => {
+    const g = setup()
+    try {
+      g.setBody(7, '## Summary\n', { headRefOid: SHA_A })
+      const e = g.run(bash, 'pr-body-edit.sh', ['--repo', 'o/r', 'ensure', '7', '42'])
+      assert.equal(e.status, 0, e.stderr)
+      const nonce = 'd'.repeat(32)
+      g.write(nonce, 'コメント')
+      const c = g.run(bash, 'pr-comment.sh', ['--repo', 'o/r', '7', nonce, bound(nonce, 7, 'コメント')])
+      assert.equal(c.status, 0, c.stderr)
+      const n = g.run(bash, 'optin-record-count.sh', ['--repo', 'o/r', '7', enc('make e2e')])
+      assert.equal(n.status, 0, n.stderr)
+      const pr = g.calls().filter((x) => x.startsWith('pr '))
+      assert.ok(pr.length >= 4, pr.join('\n'))
+      for (const x of pr) assert.match(x, / -R o\/r$/, x)
+      for (const bad of ['o', 'o/r/x', '../r', 'o//r', '-x/r', 'o r/x']) {
+        assert.equal(g.run(bash, 'pr-body-edit.sh', ['--repo', bad, 'ensure', '7', '42']).status, 2, bad)
+      }
+    } finally {
+      g.done()
+    }
+  })
+
+  test(`${tag} pr-body-edit.sh ensure --milestone-warning: pr-push.sh と同じ警告の行を無ければ足し、2 回目は足さない`, () => {
+    const g = setup()
+    try {
+      g.setBody(7, '## Summary\n\nCloses #42\n')
+      for (let i = 0; i < 2; i++) {
+        const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '7', '42', '--milestone-warning'])
+        assert.equal(r.status, 0, r.stderr)
+      }
+      const warn = '> **警告**: Closes 対象の #42 に milestone が割り当てられていない。'
+      assert.equal(g.body(7).split(warn).length - 1, 1)
+      assert.ok(readFileSync(join(SCRIPTS, 'pr-push.sh'), 'utf8').includes('> **警告**: Closes 対象の #%s に milestone が割り当てられていない。'), 'pr-push.sh と同じ文言')
+    } finally {
       g.done()
     }
   })
@@ -451,25 +489,6 @@ for (const bash of BASHES) {
       for (const bad of [['11', nonce], ['x', nonce, 'a'.repeat(64)], ['11', 'N', 'a'.repeat(64)], ['11', nonce, 'x']]) {
         assert.equal(g.run(bash, 'pr-comment.sh', bad).status, 2, bad.join(' '))
       }
-    } finally {
-      g.done()
-    }
-  })
-
-  test(`${tag} resolve-thread.sh: 旧コマンドと同じ mutation を送り、出力と終了コードをそのまま返す`, () => {
-    const g = setup({ 'graphql.json': { data: { resolveReviewThread: { thread: { id: 'PRRT_x1', isResolved: true } } } } })
-    try {
-      const old = g.old(bash, OLD.resolve('PRRT_x1'))
-      const r = g.run(bash, 'resolve-thread.sh', ['PRRT_x1'])
-      assert.equal(r.status, 0, r.stderr)
-      assert.equal(r.stdout, old.stdout)
-      const [oc, nc] = g.calls()
-      // threadId は -f（文字列）で渡す（旧コマンドの -F は数値・真偽値に見える値を型変換する）。それ以外は同じ
-      assert.equal(oc, 'api graphql -f query=mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}} -F tid=PRRT_x1')
-      assert.equal(nc, oc.replace('-F tid=', '-f tid='), '同じ mutation')
-      writeFileSync(join(g.dir, 'err-graphql'), 'GraphQL: Could not resolve to a node')
-      assert.equal(g.run(bash, 'resolve-thread.sh', ['PRRT_x1']).status, 1)
-      for (const bad of [[], ['a b'], ['x;y'], ['a', 'b'], ['x'.repeat(101)]]) assert.equal(g.run(bash, 'resolve-thread.sh', bad).status, 2, bad.join(' '))
     } finally {
       g.done()
     }

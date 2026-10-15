@@ -1023,7 +1023,7 @@ optinRecordMarkerLine(sha,result,c),
 
 
 function optinRecordArgs(commands){
-return` <sha> <results> ${commands.map((c) => c.replaceAll(' ', '%20')).join(' ')}`
+return` <sha> <results> ${commands.map((c) => String(c).replaceAll(' ', '%20')).join(' ')}`
 }
 function optinRecordArgsNote(shaNote,resultNote){
 return`   <sha> は${shaNote}、<results> は${resultNote}を宣言の順にカンマで並べた値（例: pass,not-run）に置き換える（それ以外は 1 文字も変えない。detail・not-run の理由などの補足は PR 本文へ書かず返却値にのみ残す）。`
@@ -3945,32 +3945,31 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'8b5096c5f7110942f162556e0d2dc1592c5e834c955b52214b9ba9ec947d6a6a',
-'measure-free-disk.sh':'9f099088cd4dbaeee7cb93cdfd45c46891982fe0565da87389f16d0af7c42fb7',
-'observe-pr.sh':'0e987a8edf88d73b23d22cf5bccd8e7bc999fea5cd130c8812c79473d8712b18',
-'base-merge.sh':'6e7e7a68d3be98351a183f2ba55dadb0cf2720d82aa0d2ca5ceb8308aeda3dfe',
-'pr-push.sh':'636538a7b67f3bcd3d19e30bd548203d709b284c8769fcdf9b019a3b324cb5d0',
-'state.sh':'35048530337a61d49889ed94da8b0719d60d8caea5594df892503c0bc5421703',
-'merge-gate.sh':'47942c9ceda66e8cb6f2c45d618096d2e29d18ad918e925d6f6020a83b0a528d',
-'worktree-remove.sh':'6493ab8d62b28c0eb6c0103b03722885df1bebf0a4f7b155475c43b831a49917',
-'recover-prep.sh':'85b81b0835244240681ccee8d438c307197adb5373d2ae715faa76f6e60d2e13',
+'measure-residual-bytes.sh':'a345377b3683fe0719b55930e23f9bb0ad302eac1198132835810d0068873f45',
+'measure-free-disk.sh':'f425b70c40ba150de7e0a08c831576715eb78b8f8c71e3cad536eaac9ceaa02a',
+'observe-pr.sh':'5f16771f23eb9f828d4bed69e65b5d64237a54f477b0738884cb12a08e84c694',
+'base-merge.sh':'439cb5a5ee94d24c0ea256a82a5e1523f682f6a2eec00fb6bf6a70030d80bb7f',
+'pr-push.sh':'2cdb5dedbf9da5793f69aa5573e1f19d2e102c3dc48c08340324e14e008234a5',
+'state.sh':'bc8775729de11cd52098673a60a874a2ad42bdd737f9194312e94b0d25371639',
+'merge-gate.sh':'faf002595c6079f2f6205f8eaa05bf5680abaf1cda02dd7178e6d0e2f7237291',
+'worktree-remove.sh':'4fc8299d0d73b43be6d3bf476ffe7c5ddb01a6155c570c20dfe094ae5fc72d7e',
+'recover-prep.sh':'dfa8db8698efa24ff6bcf5fb10b73168cf93b9374fff8bf6d81419099cd8cf72',
 
 
 
-'state-read.sh':'cf38485ac1fb28cac10ac766b443d58b82172bd02054f420ef3dadf882f481b6',
-'state-verify.sh':'342e260b643c6c3a3f6750e5b6bb150953231044910a03cbce31fc46e829dca6',
-'fetch-tree.sh':'d2ffcaab71371ab89f6b4d4954a067f1a3b3eba01708b68203e25e94adea0ec4',
-'fetch-root-ancestors.sh':'5f368557f94bff9c2bd4acd16eea3d608d485db884b123f0e01abe654be8a25d',
-'probe-declared-deps.sh':'a09620d1d3b2e65e60eea777fd99e2310c31cfe6d44ff63bbab4907c08cbf873',
-'probe-prereqs.sh':'47faf297d6c9aafc3f14daf6881fe91f41060bd267f3c3b49a06403c9ed7f020',
-'detect-external-checks.sh':'d9d466b0f35b41c92480901764549042a7f55e6ae02ba3870128051af88be2f9',
-'nonce-seed.sh':'0f2b7319109b8822ed2b7cbea838f69bab10c76a147d393f882eeb56c484bd90',
-'compare-files.sh':'9dd4765932e4f1aa69223969cb1c7d5d1766f69c9b6c1c2604e6dd4b28c03d48',
+'state-read.sh':'37c7a8ba06eb46ab545908f5454a2f87fcf9106a28393f91644e8b1c37ddae52',
+'state-verify.sh':'8bfcd753a799951fdb4c5897cfa9896b74af2fec3f2f3c13ef1f94e2bbfcb72d',
+'fetch-tree.sh':'de83d3a972da779dfd8fb397bc69729973a97cd5feed295a9ce3b8b9ddccc462',
+'fetch-root-ancestors.sh':'dbf88209cee9b5839be41ab58e2583f4d5864641e8d49104868b16497cd55528',
+'probe-declared-deps.sh':'c4b4655acdfba1af551ea70805a5134d477833a621fee95caef25eac1cf51cd2',
+'probe-prereqs.sh':'0ea70ffa129ed20f00dde234669ab9413b14dea34013a5ff1f1d7e95cba95b52',
+'detect-external-checks.sh':'8092504469fed6cc9dccca76c5f4017df2bd15d3c5f6ce6a80315c8de1685910',
+'nonce-seed.sh':'772c26748d2b3eb9162d16134a68240c23a9304d97f93ce86034edfa97361736',
+'compare-files.sh':'96be8ee2552a76b0f2fc0ed63beaa1496a25c18e03b9eebe457643f4d1f0997e',
 
-'pr-body-edit.sh':'b0e34b5bc5398e1220111e3b6e426b5997e42094001b82bc0d294a965905fd29',
-'optin-record-count.sh':'2ba26eb6d4936b263c847702cda1f8c0b9b9f39dffb4a172c92bb2aecdb4f124',
-'pr-comment.sh':'4f52fe5cabef8f3d6be45ada56171cc774b7308a80d7834bac82fdc72c529219',
-'resolve-thread.sh':'e99e38eb56a820b7f5d99c35c69e6009816479c78f1febf14ea01e46b539fa0c',
+'pr-body-edit.sh':'fa3d6867bc1c789786731576bea14296294cfdbece8934498343d8c0f252e463',
+'optin-record-count.sh':'16a779a0425ddc164ac70642830807bdca2bef9c9da52cceb5f1176d7ac4a396',
+'pr-comment.sh':'e9a57d3244868435870a528b2e4e6cb8c81bcbf496a51965e7aeb865db6f1a9c',
 }
 
 
@@ -6059,8 +6058,9 @@ summaryText,
 ?[
 `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
 
-`   ${scriptCommand('resolve-thread.sh', ' <threadId>')}`,
-'   resolve に成功した（終了コード 0）threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
+
+`   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
+'   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
 
 
 ...(unresolvedIds.length

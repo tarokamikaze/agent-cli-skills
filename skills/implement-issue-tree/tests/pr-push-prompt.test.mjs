@@ -89,12 +89,11 @@ test('prCreatePrompt: push の status は race を含めて PR 作成を止め�
   assert.match(prompt, /milestone-check-failed（milestone を取得できない。PR は作っていない）/)
 })
 
-test('prCreatePrompt: 再利用 PR の本文取得・更新（gh pr view / gh pr edit）にも args.repo を -R で渡す。args.repo が無ければ付けない', () => {
+test('prCreatePrompt: 再利用 PR の本文の補正（pr-body-edit.sh ensure）にも args.repo を --repo で渡し、agent に gh pr view / gh pr edit を組み立てさせない', () => {
   const prompt = prCreatePrompt(item, impl, [])
-  assert.match(prompt, /gh pr view <番号> -R Fandhe-AI\/agent-cli-skills --json body --jq \.body > "\$f"/)
-  assert.match(prompt, /gh pr edit <番号> -R Fandhe-AI\/agent-cli-skills --body-file "\$f" && rm -f "\$f"/)
+  assert.match(prompt, /pr-body-edit\.sh --repo Fandhe-AI\/agent-cli-skills ensure <番号> 466\n/)
+  assert.doesNotMatch(prompt, /gh pr (view|edit) <番号>/)
   assert.match(prompt, /<タイトルファイル>・<本文ファイル> はそれぞれ書いたファイルの絶対パスへ、<headSha> は手順 1 の結果の headSha へ置き換え、他は一字一句そのまま/, '置換対象の列挙に <headSha> を含める')
-  assert.match(prompt, /milestone が unassigned のときは、"\$f" の末尾にも「> \*\*警告\*\*/)
 })
 
 test('prCreatePrompt: PR 本文のテンプレートは 1b に 1 箇所だけあり、Closes 行・対象外節を含む。タイトルと本文はファイル経由で渡す', () => {
@@ -126,8 +125,10 @@ test('fixPrompt(pushAfterFix: true): push の status を pushed 判定へ結ぶ�
   // 非 0 終了・結果の行なしは「push 不要」と区別できる commitFailed 側へ倒す
   assert.match(text, /非 0 終了・結果の行なしも同じ扱い（pushed: false・commitFailed: true/)
   assert.ok(text.includes(CMD(` --mode push --origin fix --branch ${B} --base main${R}`)), 'fix の push にも --repo を渡す')
-  assert.match(text, /gh pr view 777 -R Fandhe-AI\/agent-cli-skills --json body/)
-  assert.match(text, /gh pr edit 777 -R Fandhe-AI\/agent-cli-skills --body-file/)
+  // 対象外の記録は pr-body-edit.sh oos-append が行い（--repo 付き）、agent に gh pr view / gh pr edit を組み立てさせない
+  const withThreads = fixPrompt(item, impl, { summary: 's', unresolvedComments: [{ threadId: 'PRRT_1', text: 't', url: 'https://example.invalid/1', path: 'a.go' }] }, true, [])
+  assert.match(withThreads, /pr-body-edit\.sh --repo Fandhe-AI\/agent-cli-skills oos-append 777 [0-9a-f]+ PRRT_1\n/)
+  assert.doesNotMatch(withThreads, /gh pr (view|edit) 777/)
 })
 
 test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の Review ループ。ローカル修正のみ）', () => {
@@ -142,14 +143,11 @@ test('baseMergePrompt（自動 base 取り込み）は pr-push.sh を呼ばな�
   assert.match(text, /base-merge\.sh/)
 })
 
-test('prCreatePrompt: milestone 警告の追記は最後の gh pr edit より前（更新後に足しても PR へ反映されない）で、最後の更新の列挙にも含む', () => {
+test('prCreatePrompt: 再利用 PR の milestone 警告は pr-body-edit.sh ensure の --milestone-warning で、1 回の gh pr edit の中で足す', () => {
   for (const outOfScope of [[], ['対象外の項目 A']]) {
     const prompt = prCreatePrompt(item, impl, outOfScope)
-    const warn = prompt.indexOf('milestone が unassigned のときは、"$f" の末尾にも')
-    const edit = prompt.indexOf(`gh pr edit <番号> -R Fandhe-AI/agent-cli-skills --body-file "$f" && rm -f "$f"`)
-    assert.ok(warn >= 0 && edit >= 0)
-    assert.ok(warn < edit, `警告の指示(${warn})が gh pr edit(${edit})より後ろにある`)
-    assert.match(prompt, /本文への追記（Closes 行・対象外節[^）]*milestone 警告）をすべて終えてから、最後に 1 回だけ更新/)
+    assert.match(prompt, /1b の結果の milestone が unassigned のときだけ、<番号> 466 の直後に --milestone-warning を足す/)
+    assert.match(prompt, /1b の結果の milestone が unassigned なら milestone の警告の行を（無ければ）足す/)
   }
 })
 

@@ -1023,7 +1023,7 @@ function optinRecordLines(sha, result, commands) {
 // 除去は行全体の形式に一致する固定パターン 3 本（PR #505 codex P1）、追記は固定形式の行だけで、旧手順と同じ。
 // 引数はコマンドの空白を %20 にした値（引用符を使わない）と、agent が置き換える <sha>・<results>。
 function optinRecordArgs(commands) {
-  return ` <sha> <results> ${commands.map((c) => c.replaceAll(' ', '%20')).join(' ')}`
+  return ` <sha> <results> ${commands.map((c) => String(c).replaceAll(' ', '%20')).join(' ')}`
 }
 function optinRecordArgsNote(shaNote, resultNote) {
   return `   <sha> は${shaNote}、<results> は${resultNote}を宣言の順にカンマで並べた値（例: pass,not-run）に置き換える（それ以外は 1 文字も変えない。detail・not-run の理由などの補足は PR 本文へ書かず返却値にのみ残す）。`
@@ -3966,11 +3966,10 @@ const SCRIPT_SHA256 = {
   'detect-external-checks.sh': '@@SCRIPT_SHA256:detect-external-checks.sh@@',
   'nonce-seed.sh': '@@SCRIPT_SHA256:nonce-seed.sh@@',
   'compare-files.sh': '@@SCRIPT_SHA256:compare-files.sh@@',
-  // PR 本文・コメント・resolve の書き込みと opt-in 記録の確認（自由文は Write ツールのファイルで渡し、照合してから使う）
+  // PR 本文・コメントの書き込みと opt-in 記録の確認（自由文は Write ツールのファイルで渡し、照合してから使う）
   'pr-body-edit.sh': '@@SCRIPT_SHA256:pr-body-edit.sh@@',
   'optin-record-count.sh': '@@SCRIPT_SHA256:optin-record-count.sh@@',
   'pr-comment.sh': '@@SCRIPT_SHA256:pr-comment.sh@@',
-  'resolve-thread.sh': '@@SCRIPT_SHA256:resolve-thread.sh@@',
 }
 
 // 同梱スクリプトを run-verified.sh 経由で起動する 1 コマンド（rest はスクリプト名の後ろに続く引数）。skillDir は
@@ -6058,9 +6057,10 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     ...(pushAfterFix
       ? [
           `5. push した修正コミットで実際に修正対応したスレッドを resolve する。(a) 手順 4 の 2 条件判定（積んだ新規コミットの存在 + push 後の ls-remote sha が自ローカル HEAD と一致）で pushed: true と確認できた場合のみ「未解決スレッド一覧」内の自分が修正対応したスレッドを resolve してよい（push コマンドの成功表示・前後で sha が変化したことだけでは足りない。pushed: false のラウンド — 空振り push・並行 push 競合・ls-remote 判定不能 — は (a) を実行しない）。(b) push しなかった場合（過去ラウンドで修正・push 済み）は次の許可リストのみ resolve してよい（ホストが決定的に算出済み。git fetch・merge-base 等の自前確認・ファイル内容確認・一覧の自前再取得での対象拡大は禁止）: ${permittedIds.length ? permittedIds.join(', ') : '(空。(b) の resolve は行わない)'}。outOfScopeComments 記録分はいずれの経路も resolve しない。該当する各 threadId について次を実行する:`,
-          // resolve の mutation（{} と引用符を含む GraphQL）は resolve-thread.sh が持つ（agent にコマンド行で組み立てさせない）
-          `   ${scriptCommand('resolve-thread.sh', ' <threadId>')}`,
-          '   resolve に成功した（終了コード 0）threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
+          // resolve の mutation は同梱スクリプトにしない（scripts/ の静的ガードが GraphQL の mutation の綴りを禁じている。
+          // 書き込みのスクリプトを持たないことを機械的に保つため、ガードに例外を作らない）
+          `   gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=<threadId>`,
+          '   resolve に成功した threadId を resolvedThreadIds 配列（「未解決スレッド一覧」からそのままコピーした値）で返す。resolve の失敗は致命的ではない（未解決のまま残ったスレッドは次周回の監視エージェントが unresolved として拾う）ため、失敗しても再試行は 1 回までとし、今回 push 済みであれば pushed: true のまま報告してよい（summary に resolve に失敗した件数と旨を書く。失敗した threadId は resolvedThreadIds に含めない）。(a)(b) いずれの条件も満たさない場合はこの手順を実行しない。(b) 経路で resolve した場合は pushed: false のまま、summary にホスト許可リストに基づき resolve した旨を書く。',
           // 対象外の行は fix 自身が書く自由文（ホストは内容を知らない）なので照合値は無い。pr-body-edit.sh oos-append が
           // 行の形と threadId（未解決スレッド一覧のもの）を確かめ、取得・節への追記・重複の除外・gh pr edit・反映の確認を行う。
           ...(unresolvedIds.length

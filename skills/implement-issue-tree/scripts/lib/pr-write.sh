@@ -67,8 +67,8 @@ pw_decode_command() {
 }
 
 # agent が Write ツールで書いたファイル（pw_written_path）を自分の一時ファイル $4 へ写し、写しの内容（末尾の改行を除く）
-# から計算した SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容) が期待値と一致するか確かめる（state-write.sh の verify_patch と
-# 同じ定義。ホストの statePatchSha256）。照合と読み込みは同じ写しに対して行う。$1 = nonce、$2 = 束縛先、$3 = 期待値。
+# から計算した SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容) が期待値と一致するか確かめる（state.sh の入力ファイルの照合と
+# 同じ形。ホストの writtenSha256）。照合と読み込みは同じ写しに対して行う。$1 = nonce、$2 = 束縛先、$3 = 期待値。
 # 一致すれば写しを「末尾の改行を除いた内容」に書き直して 0。無い・不一致は標準エラーに理由を出して非ゼロ。
 pw_verify_written() {
   local src actual content

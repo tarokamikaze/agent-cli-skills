@@ -39,7 +39,7 @@ key=''
 case "${args[0]} ${args[1]}" in
   'api graphql')
     key=graphql
-    # unresolved-threads.sh の 2 ページ目以降（-f cursor=<値>）は graphql-<値>
+    # GraphQL の 2 ページ目以降（-f cursor=<値>）は graphql-<値>
     for a in "${args[@]}"; do
       case "$a" in
         cursor=?*) key="graphql-${a#cursor=}" ;;

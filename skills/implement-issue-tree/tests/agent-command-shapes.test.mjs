@@ -160,6 +160,8 @@ test('同梱スクリプト・単独のコマンドへ移した箇所が、マ�
     'probe-declared-deps.sh', 'probe-prereqs.sh',
     // upstream の同梱スクリプト（状態ファイルの書き込み・CI の観測・マージ直前の検証・push・掃除・測定）
     'state.sh', 'observe-pr.sh', 'merge-gate.sh', 'pr-push.sh', 'worktree-remove.sh', 'measure-residual-bytes.sh',
+    // PR 本文・コメントの書き込みと opt-in 記録の確認（自由文は Write ツールのファイルで渡す）
+    'pr-body-edit.sh', 'pr-comment.sh', 'optin-record-count.sh',
   ]) {
     assert.ok(all.includes(` ${name}`), `${name} を起動するコマンドが組み立てられていない`)
   }
@@ -225,9 +227,10 @@ test('目印を付けたコマンドのヒアドキュメントは、許可し�
 
 // --- 静的な走査 ---
 
-// まだ直していない範囲の既知の例外（Issue #11）。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に、
-// 範囲 C〔PR 本文・コメント・resolve の書き込み〕は pr-body-edit.sh・optin-record-count.sh・pr-comment.sh・resolve-thread.sh に、
-// 範囲 D〔削除と終了時の処理〕は worktree-cleanup.sh・discard-safety.sh に移したので、一覧は空。新しい例外は足さない
+// 既知の例外（Issue #11）。merge-exec の G0 は merge-gate.sh、マージは単独の gh pr merge、PR 本文・コメントの書き込みは
+// pr-body-edit.sh・optin-record-count.sh・pr-comment.sh、削除と終了時の処理は worktree-remove.sh に移したので、一覧は空。
+// resolve の mutation は gh api graphql の 1 コマンドのまま（scripts/ の静的ガードが mutation のスクリプト化を禁じる。
+// (a)〜(d) のどれにも当たらない）。新しい例外は足さない
 // （足すときは range・where・rules・match・reason を持たせる。match は検出した断片〔extractCommandCandidates の 1 行の
 // 切り出し、または extractCommandBlocks の複数行の塊〕に当てる正規表現）
 const KNOWN_EXCEPTIONS = []
