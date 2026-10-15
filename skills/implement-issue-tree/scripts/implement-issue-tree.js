@@ -1369,7 +1369,7 @@ const WRITTEN_FILE_COMMIT_GUARD='   git add の前に、作業ツリーのルー
 
 
 function tempFileExcludeLine(){
-return`   git add の前に ${scriptCommand('worktree-exclude.sh')} を実行し、一時ファイル（.implement-issue-tree-*.md・*.patch-*.json・*.sweep-*.json）を git の除外設定に載せる（OK と出なければ summary に「一時ファイルの除外設定に失敗」と書いて続ける）。`
+return`   git add の前に ${scriptCommand('worktree-exclude.sh')} を実行し、一時ファイル（.implement-issue-tree-*.md と、状態ファイルの隣の .patch-*.json・.sweep-*.json）を git の除外設定に載せる（OK と出なければ summary に「一時ファイルの除外設定に失敗」と書いて続ける）。`
 }
 const commitlintCheckInstruction=`   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選ぶ。always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う（先頭だけを見て諦めない）。never で全て拒否されたら change → update の順で拒否リストに無いものを使う。いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し（変更内容に最も近いものを優先。判断できなければ先頭から）、該当する列挙値が 1 つも無ければ scope を決定できないとして fail-closed にする（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が未設定 / never の場合に限り、同ブランチで既に hook を通過した直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値（同様に検証）の順で決める。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。\n${WRITTEN_FILE_COMMIT_GUARD}`
 
@@ -3799,37 +3799,37 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'bbfdff2cf92628a1bb385dae0024a81610ae0c05529268471af7156710040cfd',
-'measure-free-disk.sh':'5f544309936edb367fc73719c6b2167b280694fbb2ccd3b8efa99623fee33d0c',
-'state-verify.sh':'fcef84269b8474a2902959959e3fc1dc8852bd14ee55e997f267cc429194877a',
-'state-read.sh':'f342e5879a8a68e18ef9cdbac23fd44a0a29ebd384b64a5601c9e1e275ed959a',
-'state-write.sh':'83e374bb6f45cf72002fc5be81b9787eb691cece20304c63cf19322f385d9c69',
-'fetch-tree.sh':'745b25f0345a41e2431e66d1c55f2f7cc4de5bf78cb6e073be8f2d6c1e952154',
-'fetch-root-ancestors.sh':'e9b6a8080d5ca9b5dd9f8ded04c38038b2cbabbda5106bcec6e74ad453a395a3',
-'probe-declared-deps.sh':'092f3bf488d4f5d6504bcb022c673fcc2a839e177e4f8866de46be5a2cfa6ccb',
-'probe-prereqs.sh':'d7d1e28bda8eafc087de8a87ec033ce48d35644be82ce0d006000fbd2875015c',
-'detect-external-checks.sh':'134fe9d4e6ae24a054e6c81589702c925e858137c5f0a7501cdfeaee1d643e11',
+'measure-residual-bytes.sh':'22f3a8f98e481bb79f9393e8782a0e864add0ee859e86828e85a8c0dc36135cf',
+'measure-free-disk.sh':'2cf17d80dfec4342ac14bd2e1151d2c94215a2f1f94017e11a8f81238708573f',
+'state-verify.sh':'5743697683d4fd9afa590872dc2a8e6f65b77cbe21990be7a0c2ca6ce9da724f',
+'state-read.sh':'1852179d46ddf91e91eeb211c4d24419a77c239a29a4d4d89b9433734a0fc5b4',
+'state-write.sh':'60bc3eec7bddf14d593b44f60e908aa5130756e859d515e6fe0d908d934b92d2',
+'fetch-tree.sh':'92b29d00891bbbf94e89c4bec796657d2a1c86b4a57c796fc7b6c57e52535a69',
+'fetch-root-ancestors.sh':'97a0fee710af152a0e9254f2cc55cf1de2e67dfbefa1bf5eba28867a12b27ff5',
+'probe-declared-deps.sh':'c834bff65f86ef0a29eab3751d70c909224c7532f4798a557993db1a6d880a33',
+'probe-prereqs.sh':'ad208d743063e27f896525919efe55b2f5011b8a63d71d89efc83a05f493c834',
+'detect-external-checks.sh':'0e0365464dcc99bdb828d3a7ef7dfca19571bfb2d0bc6b7a6c85849fc99bbb62',
 
-'nonce-seed.sh':'4bf4a3c70aa971e8fd1c3f79c099cae30f02e1b288991b2bbdae79fca7b481fd',
-'checks-total.sh':'47d740735e2a1ae3df95b3a74e6fc7bfaf5e14e6eccf363836df0b745f6a6e6c',
-'compare-files.sh':'09d53f66d59670e847aa61f1ebcacd8e85041f2e6960191759de963dfc3a5204',
-'external-check-runs.sh':'014db0b86eaa4b96ff196077af927c27df37665b073bf6d016858609600b5f9e',
-'required-context-missing.sh':'c12251023a35621f117732d03b4a1f47941010a41161cc83f7d6184144c1d1c0',
-'unresolved-threads.sh':'9978197c983a05229b74629d2551718f0ea5b748ed843af3bfb127218d955374',
-'checks-state-counts.sh':'ed7a103590baa19a72d5da2350b7b1cfd289a023061d6bedc15898768111f75f',
-'review-state-counts.sh':'66a708119ea0f8f2f1407b7d380b827f1c402eaa3c9aaeee4b13ad2a269d3a49',
+'nonce-seed.sh':'1e20c5904566d63bb3962cd1637fd92107da1b567b8e04377efdc451a87e4265',
+'checks-total.sh':'09d8187bfda4dff3e716c122e5255564dc376bd295d69f81697bf196caca96b6',
+'compare-files.sh':'decec6e010236012e424a96976762e908bff16a0f163aa778f5524d46e2c7bb9',
+'external-check-runs.sh':'feba9e98560eafec9389ff43f3826b08a32fb9e6e90086eba2e59da701b12ce5',
+'required-context-missing.sh':'f99c69e8d1be40639c170764f6e233b00682ceec07b2be40f2cb465c73e120bd',
+'unresolved-threads.sh':'0cae372756597f76a7b624c18ce461e66337a2705e96464b1c5b50b5a75f70cb',
+'checks-state-counts.sh':'311c3a3631392ea2c156d52a03060dbb2ceb33ddcc6623883c36edd57a8aeb8a',
+'review-state-counts.sh':'3a02fba467cabe0744373686e3f262ff25ec46a00af481b8d37011a7425a2d47',
 
-'pr-body-edit.sh':'47eb9eb5a56872dc07524e34a31249847f50ac6922a241532c2b89633a858b84',
-'optin-record-count.sh':'4657301c74a7f39652f1a9b00bdc728cc2cbba4f9fb899f456b54205fafa2c20',
-'pr-comment.sh':'fac69c38250a850a37483c56a913b4490b4bf539b03d794b4beaed25610e4b18',
-'resolve-thread.sh':'645d12e38dea30df4df292a716527a3aceed7625b9eb6c655d349ead24487282',
+'pr-body-edit.sh':'5fcfb826b07d07d09f7c1680f9e9c27ef36555d20a0c1802f86074620a3ef866',
+'optin-record-count.sh':'bbe29bd800f769f2c83d345f36c32376839734accc5d86a1e945e868df0b2b6d',
+'pr-comment.sh':'cbe01ac254661401391d6054938643c8d8286d3197e21ad346cde283f323558c',
+'resolve-thread.sh':'164903139cfaf0d337844f22dec5bc9c46148e9dbd45814b559f35c94d0abc69',
 
-'worktree-exclude.sh':'51edb07148606fc374870a789bed0f94d4a32ad32af9cfd0100c49f0433e1a19',
+'worktree-exclude.sh':'90361db7aff566266035e814dc5df9b390dd70cbb4bc2cea9d69f3cf20a7d9cb',
 
-'worktree-cleanup.sh':'29213d19f931ad9c3b792c2147430d32af4f89dcbd3fb273262d7b598d8fdb32',
-'discard-safety.sh':'839d53edc9f07d4625777ffe58fe7abdddb1465244f712c43895269153edfa19',
+'worktree-cleanup.sh':'78da36fe781a91ce39e87a6288762733c7c53d873a5ec3796161b4fdb257cb65',
+'discard-safety.sh':'14d42e1036ccb915f1ecec94bf8ad17cd3615fafd4831b61b65251ad9f7c1829',
 
-'g0-check.sh':'3629812f366e397073eed69e64f2974eaf042a191ec77e65cf42325d14233f97',
+'g0-check.sh':'12369350a14f4477c127188cfe2c82b03889da97facca6372cb410363ffe2ef4',
 }
 
 

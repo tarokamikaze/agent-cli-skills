@@ -105,15 +105,17 @@ pw_decode_branch() {
 
 # PR $1 の head ブランチと base ブランチが、ホストの知る名前（$2・$3。戻した値）と一致するか確かめる。agent が PR 番号を
 # 写し間違えると、無関係な PR の本文に Closes 行と対象外節を足すことになるため、本文に触れる前に照合する（Issue #18）。
+# fork からの PR は head ブランチ名が同じでも別物なので、isCrossRepository が false であることも確かめる（ホストの
+# prBindingProblem と同じ基準。true・null・欠落はすべて失敗）。
 # 取得の失敗・項目の欠落（null）・不一致は、標準エラーに理由を出して非ゼロ。
 pw_verify_pr_refs() {
   local got
-  got=$(gh pr view "$1" --json headRefName,baseRefName --jq '.headRefName, .baseRefName') || {
+  got=$(gh pr view "$1" --json headRefName,baseRefName,isCrossRepository --jq '.headRefName, .baseRefName, .isCrossRepository') || {
     echo "FAILED: PR #$1 の head・base を取得できない" >&2
     return 1
   }
-  if [ "${got}" != "$2"$'\n'"$3" ]; then
-    echo "FAILED: PR #$1 の head・base がホストの知るブランチ（$2 → $3）と一致しない" >&2
+  if [ "${got}" != "$2"$'\n'"$3"$'\n'false ]; then
+    echo "FAILED: PR #$1 の head・base・isCrossRepository がホストの知るブランチ（$2 → $3、同じリポジトリ）と一致しない" >&2
     return 1
   fi
 }

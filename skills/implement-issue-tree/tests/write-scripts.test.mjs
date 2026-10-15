@@ -78,7 +78,7 @@ const REAL_GREP = spawnSync('bash', ['-c', 'command -v grep'], { encoding: 'utf8
 const HEAD = 'feat/42-x'
 const BASE = 'main'
 const REFS = [encodeURIComponent(HEAD), encodeURIComponent(BASE)]
-const PR_REFS = { headRefName: HEAD, baseRefName: BASE }
+const PR_REFS = { headRefName: HEAD, baseRefName: BASE, isCrossRepository: false }
 const enc = (c) => c.replaceAll(' ', '%20')
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
 const bound = (nonce, scope, text) => sha256(`${nonce}\n${scope}\n${text}`)
@@ -179,6 +179,8 @@ for (const bash of BASHES) {
       // GitHub が閉じるかは確かめていないが、拒否する側に倒す形（GH-N の参照・コロンの後に空白なし・keyword と参照の間の ( < [）
       'fixes GH-12', 'closes:#12', 'Closes (#12)', 'Closes <https://github.com/o/r/issues/12>',
       'Closes [#12](https://github.com/o/r/issues/12)', 'fix: (#4)', 'resolves [o/r#9]',
+      // www 付きの URL
+      'fixes https://www.github.com/o/r/issues/8', 'Closes <https://WWW.github.com/o/r/pull/3>',
     ]) {
       const g = setup()
       g.setBody(4, 'Closes #1\n')
@@ -358,11 +360,15 @@ for (const bash of BASHES) {
     const sha = bound(nonce, 42, section)
     // [名前, 偽の gh の PR の項目, 追加の fixture]
     const cases = [
-      ['head が違う（別の PR の番号）', { headRefName: 'feat/43-y', baseRefName: BASE }, {}],
-      ['base が違う', { headRefName: HEAD, baseRefName: 'develop' }, {}],
-      ['head の接頭辞だけ一致', { headRefName: `${HEAD}-2`, baseRefName: BASE }, {}],
+      ['head が違う（別の PR の番号）', { ...PR_REFS, headRefName: 'feat/43-y' }, {}],
+      ['base が違う', { ...PR_REFS, baseRefName: 'develop' }, {}],
+      ['head の接頭辞だけ一致', { ...PR_REFS, headRefName: `${HEAD}-2` }, {}],
       ['head・base が無い', {}, {}],
-      ['head が null', { headRefName: null, baseRefName: BASE }, {}],
+      ['head が null', { ...PR_REFS, headRefName: null }, {}],
+      // fork からの PR（head ブランチ名が同じでも別物）と、isCrossRepository が null・欠落のもの（ホストの prBindingProblem と同じ基準）
+      ['fork からの PR', { ...PR_REFS, isCrossRepository: true }, {}],
+      ['isCrossRepository が null', { ...PR_REFS, isCrossRepository: null }, {}],
+      ['isCrossRepository が無い', { headRefName: HEAD, baseRefName: BASE }, {}],
       ['取得に失敗', PR_REFS, { 'err-prview-3': 'HTTP 502' }],
     ]
     for (const [name, refs, extra] of cases) {
@@ -375,7 +381,7 @@ for (const bash of BASHES) {
         assert.equal(r.stdout, '', name)
         assert.match(r.stderr, /^FAILED: /m, name)
         assert.ok(!g.calls().some((c) => c.startsWith('pr edit')), `${name}: gh pr edit を呼ばない`)
-        assert.ok(g.calls().every((c) => c === 'pr view 3 --json headRefName,baseRefName'), `${name}: 照合の前に本文を取得しない（${g.calls()}）`)
+        assert.ok(g.calls().every((c) => c === 'pr view 3 --json headRefName,baseRefName,isCrossRepository'), `${name}: 照合の前に本文を取得しない（${g.calls()}）`)
         assert.equal(g.body(3), '## Summary\n', name)
         assert.ok(!g.written(nonce), `${name}: ファイルを残さない`)
         g.done()
@@ -384,11 +390,11 @@ for (const bash of BASHES) {
     // 一致すれば書き戻す。/ を含むブランチ名は %2F で渡す
     const g = setup()
     try {
-      g.setBody(3, '## Summary\n', { headRefName: 'release/v1.2-fix', baseRefName: 'release/v1.2' })
+      g.setBody(3, '## Summary\n', { headRefName: 'release/v1.2-fix', baseRefName: 'release/v1.2', isCrossRepository: false })
       const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', 'release%2Fv1.2-fix', 'release%2Fv1.2'])
       assert.equal(r.status, 0, r.stderr)
       assert.ok(g.body(3).includes('Closes #42'))
-      assert.equal(g.calls()[0], 'pr view 3 --json headRefName,baseRefName', '照合を最初に行う')
+      assert.equal(g.calls()[0], 'pr view 3 --json headRefName,baseRefName,isCrossRepository', '照合を最初に行う')
     } finally {
       g.done()
     }

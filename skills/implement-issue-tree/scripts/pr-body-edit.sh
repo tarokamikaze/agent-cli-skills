@@ -56,7 +56,7 @@ OOS_HEADING='## 対象外（out-of-scope）'
 # コロン・開き括弧（( < [）を挟んで Issue の参照（#N・owner/repo#N・GH-N・https://github.com/owner/repo/issues/N）が続く形。
 # grep -iE で使う。GitHub が閉じると確かめた形より広く、拒否する側に倒す（closes:#12・fixes GH-12・Closes (#12)・
 # Closes <URL>・Closes [#12](URL) も拒否する。Issue #21）
-CLOSING_KEYWORD_RE='(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:](<[]*(([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+|gh-[0-9]+|https?://github[.]com/[^/[:space:]]+/[^/[:space:]]+/(issues|pull)/[0-9]+)'
+CLOSING_KEYWORD_RE='(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:](<[]*(([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+|gh-[0-9]+|https?://(www[.])?github[.]com/[^/[:space:]]+/[^/[:space:]]+/(issues|pull)/[0-9]+)'
 
 usage() {
   echo "使い方: pr-body-edit.sh {ensure|optin|oos-append} PR番号 引数..." >&2

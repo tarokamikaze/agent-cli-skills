@@ -25,8 +25,22 @@ import { importDefinitions } from './lib/stub-run.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, '..', 'scripts', 'worktree-exclude.sh')
 const BASHES = availableBashes()
-const PATTERNS = ['.implement-issue-tree-*.md', '*.patch-*.json', '*.sweep-*.json']
-const TEMP_FILES = ['.implement-issue-tree-0123abcd.md', 'tree.json.patch-0123abcd.json', 'tree.json.sweep-0123abcd.json']
+const PATTERNS = ['.implement-issue-tree-*.md', '/_/issue-trees/*.json.patch-*.json', '/_/issue-trees/*.json.sweep-*.json']
+// 作業ツリーのルートからの相対パス。ホストが作る一時ファイル（Write の .md はカレントディレクトリ、patch・sweep は
+// 状態ファイル _/issue-trees/<parent>.json の隣）
+const TEMP_FILES = [
+  '.implement-issue-tree-0123abcd.md', 'sub/.implement-issue-tree-0123abcd.md',
+  '_/issue-trees/7.json.patch-0123abcd.json', '_/issue-trees/7.json.sweep-0123abcd.json',
+]
+// 利用者のファイル（除外しない）。パターンを広く取ると、ランのあとも黙って無視され続ける
+const USER_FILES = [
+  '_/issue-trees/7.json', 'release.patch-notes.json', 'sub/x.json.patch-1.json', 'sub/_/issue-trees/7.json.patch-0.json',
+  'notes.sweep-2.json', 'sub/keep.md',
+]
+const put = (root, rel) => {
+  mkdirSync(dirname(join(root, rel)), { recursive: true })
+  writeFileSync(join(root, rel), 'x')
+}
 
 const git = (cwd, ...a) => {
   const r = spawnSync('git', a, { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } })
@@ -65,18 +79,16 @@ for (const bash of BASHES) {
       assert.equal(path, resolve(r0.main, '.git', 'info', 'exclude'))
       const lines = readFileSync(path, 'utf8').split('\n')
       for (const p of PATTERNS) assert.equal(lines.filter((l) => l === p).length, 1, p)
-      // 一時ファイルを worktree のルートとサブディレクトリに置き、サブディレクトリで git add -A する
-      for (const dir of [r0.wt, sub]) for (const f of TEMP_FILES) writeFileSync(join(dir, f), 'x')
-      writeFileSync(join(sub, 'keep.md'), 'x')
-      writeFileSync(join(sub, 'tree.json'), '{}')
+      // 一時ファイルと利用者のファイルを置き、サブディレクトリで git add -A する。一時ファイルだけが stage されない
+      for (const f of [...TEMP_FILES, ...USER_FILES]) put(r0.wt, f)
       git(sub, 'add', '-A')
       const staged = git(r0.wt, 'diff', '--cached', '--name-only').trim().split('\n').filter(Boolean).sort()
-      assert.deepEqual(staged, ['sub/keep.md', 'sub/tree.json'])
+      assert.deepEqual(staged, [...USER_FILES].sort())
       // メイン worktree と、あとから作った worktree にも効く
       const later = join(r0.root, 'later')
       git(r0.main, 'worktree', 'add', '-q', '-b', 'later', later)
       for (const dir of [r0.main, later]) {
-        for (const f of TEMP_FILES) writeFileSync(join(dir, f), 'x')
+        for (const f of TEMP_FILES) put(dir, f)
         git(dir, 'add', '-A')
         assert.equal(git(dir, 'diff', '--cached', '--name-only').trim(), '', dir)
       }
@@ -123,6 +135,18 @@ for (const bash of BASHES) {
     }
   })
 }
+
+test('パターンはホストが実際に作る一時ファイルの名前の形に合う（状態ファイルの場所・patch / sweep / Write の .md の名前）', () => {
+  const src = readFileSync(join(HERE, '..', 'scripts', 'implement-issue-tree.src.js'), 'utf8')
+  // patch・sweep は作業ツリーのルートからの _/issue-trees/<parent>.json の隣（ルートにアンカーできる）
+  assert.ok(src.includes('const STATE_FILE = `_/issue-trees/${parent}.json`'), 'STATE_FILE の場所')
+  assert.ok(src.includes('`${STATE_FILE}.patch-${nonce}.json`'), 'patch の名前')
+  assert.ok(src.includes('${STATE_FILE}.sweep-${nonce}.json'), 'sweep の名前')
+  // Write の .md はカレントディレクトリ（ルートの保証が無いのでアンカーしない）
+  assert.ok(src.includes('const writtenFileOf = (nonce) => `.implement-issue-tree-${nonce}.md`'), '.md の名前')
+  const script = readFileSync(SCRIPT, 'utf8')
+  assert.ok(script.includes(`patterns=(${PATTERNS.map((p) => `'${p}'`).join(' ')})`), 'スクリプトのパターンとテストの一覧が同じ')
+})
 
 test('ホストのプロンプト: コミットを作る手順と PR 作成の base 取り込みの解消が、git add の前に worktree-exclude.sh を起動させる', async () => {
   const defs = await importDefinitions(['implementPrompt', 'recoverImplementPrompt', 'fixPrompt', 'prCreatePrompt', 'ensureBoundaryNonceSeed', 'WRITTEN_FILE_COMMIT_GUARD'], 'temp-file-exclude')

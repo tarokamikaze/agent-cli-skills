@@ -6,7 +6,7 @@
 //   - SKILL.md と references/*.md。references/script-trust-model.md は、旧コマンドと hook が拒否する形を説明する文書
 //     （表・本文の `cat <file>` などは実行させる手順ではない）なので対象外
 //   - コードフェンス（bash・sh・shell・言語指定なし）の各行。行末の \ でつないだ行は 1 本にする。# で始まる行は読まない
-//   - 直前の行に <!-- command-shape: script-file --> を置いたフェンスは対象外。複数文の診断用のブロックで、ファイルに
+//   - 直前の行に <!-- command-shape: script-file --> を置いたフェンスは対象外（置ける場所は SCRIPT_FILE_BLOCKS の許可リストで固定）。複数文の診断用のブロックで、ファイルに
 //     書いて bash <file> で実行する前提のもの（本文にその旨を書く）
 //   - フェンスの外のインラインコード（`...`）
 //   - (a)・(c) は見ない（Issue #22 の範囲外。文中の JS の式 a && b なども (c) に当たるため）
@@ -71,6 +71,59 @@ function extractDocCommands(markdown) {
   return out
 }
 
+/**
+ * script-file の目印を { line, heading, first } で列挙する。heading は目印より前の最も近い Markdown の見出し（フェンスの
+ * 中の # は数えない）、first は直後のフェンスの最初の空でない行（直後がフェンスでなければ空文字）。
+ */
+function scriptFileMarkers(markdown) {
+  const out = []
+  const lines = markdown.split('\n')
+  let fence = null
+  let heading = ''
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const open = line.match(/^\s*(`{3,}|~{3,})\s*([\w-]*)/)
+    if (fence) {
+      if (open && open[1][0] === fence[0] && open[1].length >= fence.length && !open[2]) fence = null
+      continue
+    }
+    if (open) {
+      fence = open[1]
+      continue
+    }
+    const h = line.match(/^#{1,6}\s+(.*\S)\s*$/)
+    if (h) heading = h[1]
+    if (line.trim() !== SCRIPT_FILE_MARKER) continue
+    let j = i + 1
+    while (j < lines.length && lines[j].trim() === '') j++
+    let first = ''
+    if (j < lines.length && /^\s*(`{3,}|~{3,})/.test(lines[j])) {
+      let k = j + 1
+      while (k < lines.length && lines[k].trim() === '') k++
+      first = (lines[k] ?? '').trim()
+    }
+    out.push({ line: i + 1, heading, first })
+  }
+  return out
+}
+
+// script-file の目印で検査から外してよいブロックの許可リスト（位置はファイル・見出し・ブロックの最初の行で固定する）。
+// 目印を足すときは、ここに理由と一緒に載せる。載っていない目印・何にも当たらない項目はテストが失敗する
+const SCRIPT_FILE_BLOCKS = [
+  {
+    file: 'SKILL.md',
+    heading: 'Step 6: CI / 外部チェック監視・レビューコメント解決確認・squash merge する（Merge）',
+    first: '# (A) エージェントが実行してよい形。取得成否を先に確定してから「件数」のみを返す。',
+    reason: 'if / else と代入・awk の集計を含む複数文の診断。ファイルに書いて bash <file> で実行する',
+  },
+  {
+    file: 'SKILL.md',
+    heading: 'Step 6: CI / 外部チェック監視・レビューコメント解決確認・squash merge する（Merge）',
+    first: '# (B) 人間の診断専用。重複の内訳をチェック名つきで確認する（ファイルに書いて bash <file> で実行する）',
+    reason: 'jq の存在確認と、--slurp の生 JSON を外部の jq で集約する複数文の人間向け診断。ファイルに書いて実行する',
+  },
+]
+
 function violationsOf(markdown) {
   return extractDocCommands(markdown).flatMap((c) =>
     checkCommand(c.text).filter((v) => RULES.has(v.rule)).map((v) => ({ ...c, rule: v.rule })),
@@ -86,6 +139,39 @@ test('SKILL.md と references の手順のコマンドは (b)・(d) に当たら
     for (const v of violationsOf(readFileSync(join(SKILL, f), 'utf8'))) found.push(`${f}:${v.line} (${v.rule}) ${v.text}`)
   }
   assert.deepEqual(found, [])
+})
+
+test('script-file の目印は許可リスト（ファイル・見出し・ブロックの最初の行・理由）に載ったブロックにだけ置かれ、許可リストの項目はすべて使われている', () => {
+  const found = DOCS.flatMap((f) => scriptFileMarkers(readFileSync(join(SKILL, f), 'utf8')).map((m) => ({ file: f, ...m })))
+  const key = (e) => `${e.file} / ${e.heading} / ${e.first}`
+  const allowed = new Set(SCRIPT_FILE_BLOCKS.map(key))
+  assert.deepEqual(found.filter((m) => !allowed.has(key(m))).map((m) => `${m.file}:${m.line} ${key(m)}`), [], '許可リストに無い目印')
+  const used = new Set(found.map(key))
+  assert.deepEqual(SCRIPT_FILE_BLOCKS.filter((e) => !used.has(key(e))).map(key), [], '何にも当たらない許可リストの項目')
+  for (const e of SCRIPT_FILE_BLOCKS) assert.ok(e.reason, key(e))
+})
+
+test('検査器: script-file の目印の位置（見出し・最初の行）を取り出す。フェンスの中の # は見出しにしない。直後がフェンスでない目印も拾う', () => {
+  const md = [
+    '## 節 A',
+    '```bash',
+    '# フェンスの中のコメント',
+    '```',
+    SCRIPT_FILE_MARKER,
+    '',
+    '```bash',
+    '',
+    '# ブロック 1',
+    'x=1',
+    '```',
+    '### 節 B',
+    SCRIPT_FILE_MARKER,
+    '本文',
+  ].join('\n')
+  assert.deepEqual(scriptFileMarkers(md), [
+    { line: 5, heading: '節 A', first: '# ブロック 1' },
+    { line: 13, heading: '節 B', first: '' },
+  ])
 })
 
 test('対象外の文書は存在し、理由を持つ（消えた・改名したら一覧から外す）', () => {
