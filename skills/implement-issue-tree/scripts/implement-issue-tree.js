@@ -3032,9 +3032,12 @@ if(attemptRef)attemptRef.n=2
 return second
 }
 
+
+
 async function runStateAgent(prompt,{label,schema,isValid}){
 const promptWithDirective=`${prompt}\n${STATE_RETURN_DIRECTIVE}`
 let attempts=0
+let last=null
 for(const model of STATE_AGENT_MODEL_CHAIN){
 attempts++
 const isPrimary=model===STATE_AGENT_MODEL_CHAIN[0]
@@ -3047,13 +3050,17 @@ log(`⚠️ ${attemptLabel}: state 書込みエージェントが例外終了し
 result=null
 }
 if(isValid(result))return{result,outputMissing:false,attempts}
+last=result
 const isLast=model===STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length- 1]
 if(!isLast){
 log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
 }
 }
-return{result:null,outputMissing:true,attempts}
+return{result:null,outputMissing:true,attempts,last}
 }
+
+
+
 
 
 
@@ -3072,15 +3079,24 @@ if(!s|| !c||s.length!==1)return null
 const base={ok:false,fileExisted:true,count:0,highWaterBytes:0,highWaterVersion:0}
 if(s[0]==='NOFILE'){
 if(readOnly)return c.length?null:{ ...base,ok:true,fileExisted:false}
-if(c.length>1)return null
-const created= /^STATE_RESULT[ \t]+\{"ok":true\}$/.test(c[0] ?? '')
-return{ ...base,ok:created,fileExisted:false,highWaterVersion:created?HIGH_WATER_SCHEMA_VERSION:0}
+if(c.length!==1)return null
+if(/^STATE_RESULT[ \t]+\{"ok":true\}$/.test(c[0])) return { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION }
+return /^STATE_RESULT[ \t]+\{"ok":false,"reason":"[a-z][a-z-]{0,39}"\}$/.test(c[0]) ? { ...base, fileExisted: false } : null
 }
 if(c.length)return null
 if(s[0]==='PARSE_ERROR')return base
 const n='(0|[1-9]\\d{0,14})'
 const m=new RegExp(`^OK[ \\t]+count=${n}[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(s[0])
 return m?{ ...base,ok:true,count:Number(m[1]),highWaterBytes:Number(m[2]),highWaterVersion:Number(m[3])}:null
+}
+
+
+
+
+function isStateLoadValueMalformed(summaryLine){
+if(typeof summaryLine!=='string')return false
+const s=summaryLine.split('\n').map((l)=>l.trim()).filter(Boolean)
+return s.length===1&& /^OK[ \t]+count=.*[ \t]+bytes=.*[ \t]+version=.*$/.test(s[0]) && parseStateLoadSummary(s[0], '', false) === null
 }
 
 
@@ -3267,7 +3283,7 @@ async function loadState(){
 const readOnly=dryRunEnabled
 
 
-const{result:loadRaw,outputMissing}=await runStateAgent(
+const{result:loadRaw,outputMissing,last:loadLast}=await runStateAgent(
 [
 `状態ファイル読み込みタスク。`,
 TEMP_FILE_POLICY,
@@ -3296,6 +3312,16 @@ const result=loadRaw&&{ ...parseStateLoadSummary(loadRaw.summaryLine,loadRaw.cre
 
 
 if(outputMissing){
+
+
+
+if(isStateLoadValueMalformed(loadLast?.summaryLine)){
+throw new Error(
+`状態ファイル（${STATE_FILE}）の件数・高水位・版のいずれかが整数でない。ファイルが壊れている可能性があり、再実行では直らない。`+
+`退避（mv ${STATE_FILE} ${STATE_FILE}.aside）してから内容を確認し、修復するか削除して再実行すること`+
+`（references/recovery.md の「状態ファイルが壊れている場合」）。`,
+)
+}
 throw new Error(
 `状態ファイル（${STATE_FILE}）読み込みエージェントが haiku / sonnet いずれも`+
 `StructuredOutput を返さなかった（または返した行の形が合わなかった）。ファイル自体の破損ではないため、そのまま再実行すること。`,

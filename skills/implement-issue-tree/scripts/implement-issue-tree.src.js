@@ -3032,9 +3032,12 @@ async function agentRetryOnce(prompt, opts, retrySuffix = '', rewritePrompt = (p
   return second
 }
 
+// last: 全モデルで isValid を満たせなかったときの、最後のモデルの応答（未返却・例外なら null）。呼び出し側が停止の案内を
+// 分けるためだけに使い、値を採用しない（loadState が状態ファイルの値の破損と転記の誤りを区別する。監査の P2）。
 async function runStateAgent(prompt, { label, schema, isValid }) {
   const promptWithDirective = `${prompt}\n${STATE_RETURN_DIRECTIVE}`
   let attempts = 0
+  let last = null
   for (const model of STATE_AGENT_MODEL_CHAIN) {
     attempts++
     const isPrimary = model === STATE_AGENT_MODEL_CHAIN[0]
@@ -3047,12 +3050,13 @@ async function runStateAgent(prompt, { label, schema, isValid }) {
       result = null
     }
     if (isValid(result)) return { result, outputMissing: false, attempts }
+    last = result
     const isLast = model === STATE_AGENT_MODEL_CHAIN[STATE_AGENT_MODEL_CHAIN.length - 1]
     if (!isLast) {
       log(`⚠️ ${attemptLabel}: StructuredOutput 未返却相当（例外・null・schema 不適合）。次のモデルへフォールバックする`)
     }
   }
-  return { result: null, outputMissing: true, attempts }
+  return { result: null, outputMissing: true, attempts, last }
 }
 
 // state:load が返した行（summaryLine・createLine）をホストが分解する純粋関数（Issue #23 と同じ方式。
@@ -3061,7 +3065,10 @@ async function runStateAgent(prompt, { label, schema, isValid }) {
 // createLine は NOFILE のときに実行した state.sh create の標準出力（成功なら STATE_RESULT {"ok":true}）。各行の前後の空白・
 // CRLF・空行は許す。返り値は { ok, fileExisted, count, highWaterBytes, highWaterVersion }。
 // - NOFILE: readOnly（dryRun）は作らないので createLine は空でなければならない。それ以外は createLine が
-//   STATE_RESULT {"ok":true} なら新規作成の成功（版は HIGH_WATER_SCHEMA_VERSION・高水位 0）、それ以外は初期化の失敗（ok: false）
+//   STATE_RESULT {"ok":true} の 1 行なら新規作成の成功（版は HIGH_WATER_SCHEMA_VERSION・高水位 0）、
+//   STATE_RESULT {"ok":false,"reason":"<固定語彙>"} の 1 行なら初期化の失敗（ok: false）。createLine が空・
+//   STATE_RESULT の形でない行は null（形が合わない）: create を実行しても出力の転記を忘れた応答を「初期化に失敗した」と
+//   誤って案内しないため、sonnet で取り直させる（監査の P2）
 // - ファイルがある（PARSE_ERROR / OK …）のに createLine がある、ラベル違い・数値でない値・先頭のゼロ・
 //   余分な行・欠けた行は null（形が合わない。isValid が不正としてフォールバックへ回し、それでも不正なら停止）
 function parseStateLoadSummary(summaryLine, createLine, readOnly) {
@@ -3072,15 +3079,24 @@ function parseStateLoadSummary(summaryLine, createLine, readOnly) {
   const base = { ok: false, fileExisted: true, count: 0, highWaterBytes: 0, highWaterVersion: 0 }
   if (s[0] === 'NOFILE') {
     if (readOnly) return c.length ? null : { ...base, ok: true, fileExisted: false }
-    if (c.length > 1) return null
-    const created = /^STATE_RESULT[ \t]+\{"ok":true\}$/.test(c[0] ?? '')
-    return { ...base, ok: created, fileExisted: false, highWaterVersion: created ? HIGH_WATER_SCHEMA_VERSION : 0 }
+    if (c.length !== 1) return null
+    if (/^STATE_RESULT[ \t]+\{"ok":true\}$/.test(c[0])) return { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION }
+    return /^STATE_RESULT[ \t]+\{"ok":false,"reason":"[a-z][a-z-]{0,39}"\}$/.test(c[0]) ? { ...base, fileExisted: false } : null
   }
   if (c.length) return null
   if (s[0] === 'PARSE_ERROR') return base
   const n = '(0|[1-9]\\d{0,14})'
   const m = new RegExp(`^OK[ \\t]+count=${n}[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(s[0])
   return m ? { ...base, ok: true, count: Number(m[1]), highWaterBytes: Number(m[2]), highWaterVersion: Number(m[3]) } : null
+}
+
+// summaryLine が OK count=… bytes=… version=… のラベルの形をした 1 行で、値だけが整数でない（1.5・abc・空・先頭のゼロ）か
+// （監査の P2）。state-read.sh は状態ファイルの値を加工せずに出すため、最後のモデルまでこの形の行を返したなら、転記の誤りでは
+// なく状態ファイルの値の破損と見なす（再実行しても同じ所で止まる）。ラベル違い・余分な行は転記の誤りとして扱う（false）。
+function isStateLoadValueMalformed(summaryLine) {
+  if (typeof summaryLine !== 'string') return false
+  const s = summaryLine.split('\n').map((l) => l.trim()).filter(Boolean)
+  return s.length === 1 && /^OK[ \t]+count=.*[ \t]+bytes=.*[ \t]+version=.*$/.test(s[0]) && parseStateLoadSummary(s[0], '', false) === null
 }
 
 // state:load の isValid（Issue #493 codex 指摘）。必須フィールドの欠落した応答を成功として受理すると
@@ -3267,7 +3283,7 @@ async function loadState() {
   const readOnly = dryRunEnabled
   // 出力の行は加工せずに返させ、成否・ファイルの有無・高水位・版はホスト（parseStateLoadSummary）が分解する
   // （Issue #23 と同じ方式。位置で数値を分解させると小さいモデルが取り違える）。
-  const { result: loadRaw, outputMissing } = await runStateAgent(
+  const { result: loadRaw, outputMissing, last: loadLast } = await runStateAgent(
     [
       `状態ファイル読み込みタスク。`,
       TEMP_FILE_POLICY,
@@ -3296,6 +3312,16 @@ async function loadState() {
   // 「初期化に失敗した」という誤った文言を避け、専用の再実行案内にする（Issue #493。result は
   // null のためこの分岐を独立させないと誤って初期化失敗メッセージに落ちる）。
   if (outputMissing) {
+    // 行の形（ラベル）は合っていて値だけが整数でないなら、転記の誤りではなく状態ファイルの値の破損と見なす（監査の P2）。
+    // 「そのまま再実行」と案内すると同じ所で止まり続けるため、破損の可能性と退避の手順を案内する。値はログに出さない
+    // （状態ファイルの中身は非信頼のデータ）
+    if (isStateLoadValueMalformed(loadLast?.summaryLine)) {
+      throw new Error(
+        `状態ファイル（${STATE_FILE}）の件数・高水位・版のいずれかが整数でない。ファイルが壊れている可能性があり、再実行では直らない。` +
+        `退避（mv ${STATE_FILE} ${STATE_FILE}.aside）してから内容を確認し、修復するか削除して再実行すること` +
+        `（references/recovery.md の「状態ファイルが壊れている場合」）。`,
+      )
+    }
     throw new Error(
       `状態ファイル（${STATE_FILE}）読み込みエージェントが haiku / sonnet いずれも` +
       `StructuredOutput を返さなかった（または返した行の形が合わなかった）。ファイル自体の破損ではないため、そのまま再実行すること。`,

@@ -29,8 +29,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = join(HERE, '..', 'scripts')
 const SAMPLE = readFileSync(join(HERE, '..', 'sample', 'state-example.json'), 'utf8')
 const BASHES = availableBashes()
-const { sha256Hex, canonicalJson, verifyLoadedItems, stateInputSha256, parseStateVerifyHeader, isValidStateVerifyResult, parseStateLoadSummary } = await importDefinitions(
-  ['sha256Hex', 'canonicalJson', 'verifyLoadedItems', 'stateInputSha256', 'parseStateVerifyHeader', 'isValidStateVerifyResult', 'parseStateLoadSummary'],
+const { sha256Hex, canonicalJson, verifyLoadedItems, stateInputSha256, parseStateVerifyHeader, isValidStateVerifyResult, parseStateLoadSummary, isStateLoadValueMalformed } = await importDefinitions(
+  ['sha256Hex', 'canonicalJson', 'verifyLoadedItems', 'stateInputSha256', 'parseStateVerifyHeader', 'isValidStateVerifyResult', 'parseStateLoadSummary', 'isStateLoadValueMalformed'],
   'state-scripts',
 )
 
@@ -181,6 +181,26 @@ for (const bash of BASHES) {
       const after = run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout
       assert.equal(after, 'OK count=0 bytes=0 version=2\n')
       assert.deepEqual(parseStateLoadSummary(after, '', false), { ok: true, fileExisted: true, count: 0, highWaterBytes: 0, highWaterVersion: 2 })
+    })
+  })
+
+  test(`${tag} state-read.sh summary: 高水位・版が整数でない状態ファイル（1.5・"abc"）の行は、ホストが分解せず値の破損と判定する`, () => {
+    withWork((work) => {
+      const cases = [
+        [{ perWorktreeByteReserveHighWater: 1.5, perWorktreeByteReserveHighWaterVersion: 2 }, 'OK count=0 bytes=1.5 version=2\n'],
+        [{ perWorktreeByteReserveHighWater: 'abc', perWorktreeByteReserveHighWaterVersion: 2 }, 'OK count=0 bytes=abc version=2\n'],
+        [{ perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: 'abc' }, 'OK count=0 bytes=0 version=abc\n'],
+      ]
+      for (const [i, [fields, want]] of cases.entries()) {
+        const rel = seed(work, JSON.stringify({ parent: 30 + i, ...fields, items: {} }), 30 + i)
+        const out = run(bash, 'state-read.sh', ['summary', rel], { cwd: work }).stdout
+        assert.equal(out, want)
+        assert.equal(parseStateLoadSummary(out, '', false), null, out)
+        assert.equal(isStateLoadValueMalformed(out), true, out)
+      }
+      // 整数の行は破損と判定しない
+      const ok = run(bash, 'state-read.sh', ['summary', seed(work, MIXED)], { cwd: work }).stdout
+      assert.equal(isStateLoadValueMalformed(ok), false)
     })
   })
 

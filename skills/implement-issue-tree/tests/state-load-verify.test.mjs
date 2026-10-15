@@ -54,6 +54,7 @@ const SLICE_EXPORTS = [
   'parseStateVerifyHeader',
   'parseStateLoadSummary',
   'isValidStateLoadResult',
+  'isStateLoadValueMalformed',
   'HIGH_WATER_SCHEMA_VERSION',
   'applyPrereqTransitions',
   'normalizeBlockedReason',
@@ -77,6 +78,7 @@ const {
   parseStateVerifyHeader,
   parseStateLoadSummary,
   isValidStateLoadResult,
+  isStateLoadValueMalformed,
   HIGH_WATER_SCHEMA_VERSION,
   applyPrereqTransitions,
   normalizeBlockedReason,
@@ -1041,6 +1043,120 @@ test('loadState: 読込の haiku が summary の行を加工したら sonnet で
       opts.label.startsWith('state:load-verify') ? verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 }) : { ...good, summaryLine: tampered })
     await assert.rejects(() => loadState(), /再実行/, tampered)
   }
+})
+
+// 監査の P2: ラベルの形は合っていて値だけが整数でない summary の行（1.5・"abc"）は、haiku・sonnet が同じ行を返す限り
+// 転記の誤りではなく状態ファイル自体の値の破損である。「ファイル自体の破損ではないため、そのまま再実行」と案内すると
+// 再実行のたびに同じ所で止まるので、破損の可能性と退避の手順を案内する。
+test('loadState: 件数・高水位・版が整数でない summary の行（両モデルが同じ行を返す）は、破損の可能性と退避の手順を案内して停止する', async () => {
+  for (const summaryLine of [
+    'OK count=4 bytes=1.5 version=2',
+    'OK count=4 bytes=abc version=2',
+    'OK count=4 bytes=4096 version=abc',
+    'OK count=4 bytes=4096 version=2.5',
+    'OK count=4 bytes=-1 version=2',
+    'OK count=4 bytes= version=2',
+    'OK count=4 bytes=a b version=2',
+  ]) {
+    const { calls } = installAgentStub((opts) =>
+      opts.label.startsWith('state:load-verify') ? verifyOut(SAMPLE_JQ_HASHES) : { summaryLine, createLine: '', items: sampleItems })
+    await assert.rejects(() => loadState(), (err) => {
+      assert.match(err.message, /壊れている可能性/, summaryLine)
+      assert.match(err.message, /mv _\/issue-trees\/1\.json _\/issue-trees\/1\.json\.aside/, summaryLine)
+      assert.match(err.message, /recovery\.md/, summaryLine)
+      assert.doesNotMatch(err.message, /ファイル自体の破損ではない/, summaryLine)
+      return true
+    })
+    // 形が合わないのでフォールバックで 1 回取り直してから止まる（検証エージェントは起動しない）
+    assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load:fallback-sonnet'], summaryLine)
+  }
+})
+
+test('loadState: 値の破損と判定するのは最後のモデルの行で、haiku だけが値を崩したなら sonnet の正しい行で通る', async () => {
+  const good = loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
+  installAgentStub((opts) => {
+    if (opts.label.startsWith('state:load-verify')) return verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 })
+    return opts.model === 'haiku' ? { ...good, summaryLine: 'OK count=4 bytes=4096.0 version=2' } : good
+  })
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.equal(r.highWaterBytes, 4096)
+})
+
+test('loadState: ラベルが崩れた行・行の欠落（転記の誤り）は従来どおり「そのまま再実行」を案内し、破損とは言わない', async () => {
+  for (const r of [
+    { summaryLine: 'OK 4 4096 2', createLine: '', items: sampleItems },
+    { summaryLine: 'OK count=4 bytes=4096 version=2\nextra', createLine: '', items: sampleItems },
+    { summaryLine: 'OK count=4 version=2 bytes=4096', createLine: '', items: sampleItems },
+    null,
+  ]) {
+    installAgentStub((opts) => (opts.label.startsWith('state:load-verify') ? verifyOut(SAMPLE_JQ_HASHES) : r))
+    await assert.rejects(() => loadState(), (err) => {
+      assert.match(err.message, /そのまま再実行/, JSON.stringify(r))
+      assert.doesNotMatch(err.message, /壊れている可能性/, JSON.stringify(r))
+      return true
+    })
+  }
+})
+
+test('isStateLoadValueMalformed: ラベルの形が合い値だけが整数でない 1 行だけを破損とみなす', () => {
+  for (const s of ['OK count=4 bytes=1.5 version=2', ' OK count=x bytes=0 version=0 \r\n', 'OK count=4 bytes=4096 version=', 'OK count=01 bytes=0 version=2']) {
+    assert.equal(isStateLoadValueMalformed(s), true, JSON.stringify(s))
+  }
+  for (const s of [
+    'OK count=4 bytes=4096 version=2', // 正しい行
+    'OK 4 4096 2', 'OK count=4 version=2 bytes=4096', 'ok count=4 bytes=1.5 version=2', // ラベル違い
+    'OK count=4 bytes=1.5 version=2\nOK count=4 bytes=1.5 version=2', // 余分な行
+    'NOFILE', 'PARSE_ERROR', '', undefined, null, 3,
+  ]) {
+    assert.equal(isStateLoadValueMalformed(s), false, JSON.stringify(s))
+  }
+})
+
+// 監査の P2: 非 readOnly の NOFILE で createLine が空のとき、以前は「初期化に失敗した」で止まった。haiku が create に成功しても
+// 出力の転記を忘れると誤った案内になるため、空の createLine（と STATE_RESULT の形でない行）は形が合わないとして sonnet で取り直す。
+test('parseStateLoadSummary: 非 readOnly の NOFILE で createLine が空・STATE_RESULT の形でない行は null（形が合わない）', () => {
+  for (const c of [
+    '', ' \n', '\r\n', undefined,
+    'OK', 'ok', 'FAILED: exists', 'STATE_RESULT', 'STATE_RESULT {"ok":true,"x":1}', 'STATE_RESULT {"ok": true}',
+    'STATE_RESULT {"ok":false}', 'STATE_RESULT {"ok":false,"reason":""}', 'STATE_RESULT {"ok":false,"reason":"Bad Reason"}',
+    'STATE_RESULT_X {"ok":true}', 'echo STATE_RESULT {"ok":true}',
+  ]) {
+    assert.equal(parseStateLoadSummary('NOFILE', c, false), null, JSON.stringify(c))
+  }
+  assert.equal(isValidStateLoadResult({ summaryLine: 'NOFILE', createLine: '', items: {} }, false), false)
+  // 読み取り専用（dryRun）は create を実行しないので、空の createLine が正しい
+  assert.equal(isValidStateLoadResult({ summaryLine: 'NOFILE', createLine: '', items: {} }, true), true)
+})
+
+test('loadState: 新規ツリーで haiku が create の出力の転記を忘れたら（createLine が空）sonnet で取り直して通る', async () => {
+  const { calls } = installAgentStub((opts) => {
+    if (opts.label.startsWith('state:load-verify')) return verifyOut({}, { version: 2 })
+    return opts.model === 'haiku' ? { summaryLine: 'NOFILE', createLine: '', items: {} } : CREATED_LOAD
+  })
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.equal(r.highWaterVersion, 2)
+  assert.deepEqual(calls.slice(0, 2).map((c) => c.opts.label), ['state:load', 'state:load:fallback-sonnet'])
+})
+
+test('loadState: haiku・sonnet とも createLine が空なら「初期化に失敗した」と言わず、再実行を案内して停止する', async () => {
+  installAgentStub((opts) =>
+    opts.label.startsWith('state:load-verify') ? verifyOut({}, { version: 2 }) : { summaryLine: 'NOFILE', createLine: '', items: {} })
+  await assert.rejects(() => loadState(), (err) => {
+    assert.doesNotMatch(err.message, /初期化に失敗した/)
+    assert.match(err.message, /再実行/)
+    return true
+  })
+})
+
+test('loadState: create の結果の行が ok: false なら、従来どおり初期化の失敗として停止する（フォールバックしない）', async () => {
+  const { calls } = installAgentStub((opts) =>
+    opts.label.startsWith('state:load-verify')
+      ? NOFILE_OUT
+      : { summaryLine: 'NOFILE', createLine: 'STATE_RESULT {"ok":false,"reason":"rewrite-failed"}', items: {} })
+  await assert.rejects(() => loadState(), /初期化に失敗した/)
+  assert.deepEqual(calls.map((c) => c.opts.label), ['state:load'])
 })
 
 test('loadState: summary の版が検証側と食い違えば（読込側の 0 など）従来どおり停止する', async () => {

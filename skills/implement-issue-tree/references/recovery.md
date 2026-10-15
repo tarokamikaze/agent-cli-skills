@@ -95,7 +95,7 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
 `state:load`（Restore フェーズの状態ファイル読込・初期化）が haiku / sonnet とも未返却の場合は
 停止する（fail-closed は維持。壊れた・未永続化の状態で続行すると重複 PR・重複実装の危険がある）。
 ただし文言は「初期化に失敗した」という誤ったメッセージにはせず、未返却専用の案内（ファイル自体の
-破損ではないため、そのまま再実行すればよい旨）にする。
+破損ではないため、そのまま再実行すればよい旨）にする（値だけが整数でない場合の例外は下の段落）。
 
 `state:load` のエージェントには数値を返させない。`state-read.sh summary` の行
 （`NOFILE` / `PARSE_ERROR` / `OK count=<件数> bytes=<高水位> version=<版>`）と、`NOFILE` のときに
@@ -104,7 +104,12 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
 同じく、位置で数値を分解させると小さいモデルが取り違え、照合不成立でランが止まるため）。前後の空白・
 改行の揺れは許し、ラベル違い・数値でない値・余分な行・ファイルがあるのに `createLine` がある応答・
 読み取り専用（`dryRun`）で作成した応答は形が合わないとして sonnet で取り直し、それでも合わなければ
-上の未返却と同じく停止する。`createLine` が `STATE_RESULT {"ok":true}` 以外（作成の失敗）は初期化の失敗として停止する。
+上の未返却と同じく停止する。`createLine` が `STATE_RESULT {"ok":false,"reason":"…"}`（作成の失敗）なら
+初期化の失敗として停止する。`NOFILE` なのに `createLine` が空・`STATE_RESULT` の形でない応答は、create を実行しても
+出力の転記を忘れた可能性があるので、初期化の失敗とは扱わず形が合わないとして sonnet で取り直す。
+最後のモデルまで返した `summaryLine` がラベルの形（`OK count=… bytes=… version=…`）は合っていて値だけが整数でない
+（`1.5`・`abc` など）ときは、転記の誤りではなく状態ファイルの値の破損と見なし、「そのまま再実行」ではなく
+破損の可能性と退避の手順（下の「状態ファイルが壊れている場合」）を案内して停止する。
 
 ### 状態ファイル読込の内容照合と PR 照合
 
@@ -308,6 +313,14 @@ jq '{hw: .perWorktreeByteReserveHighWater, v: .perWorktreeByteReserveHighWaterVe
 状態ファイル（_/issue-trees/42.json）の読み込みまたは JSON パースに失敗した。
 ファイルを手動で確認・修復してから再実行すること。
 削除してフレッシュスタートする場合は `rm _/issue-trees/42.json` を実行する。
+```
+
+JSON としては読めても、件数・高水位（`perWorktreeByteReserveHighWater`）・版（`perWorktreeByteReserveHighWaterVersion`）の
+いずれかが整数でない（`1.5`・`"abc"` など）場合も、同じく停止する。再実行しても同じ所で止まるため、先に退避する:
+
+```
+状態ファイル（_/issue-trees/42.json）の件数・高水位・版のいずれかが整数でない。ファイルが壊れている可能性があり、再実行では直らない。
+退避（mv _/issue-trees/42.json _/issue-trees/42.json.aside）してから内容を確認し、修復するか削除して再実行すること（references/recovery.md の「状態ファイルが壊れている場合」）。
 ```
 
 対処方法（状態ファイルの内容は、ファイルを読むツール〔Read〕で `_/issue-trees/42.json` を開いて確認する。`cat` で読まない）:
