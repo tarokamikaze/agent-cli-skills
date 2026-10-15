@@ -29,8 +29,8 @@ const SCRIPT_PATH = join(
 const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 
 const source = readFileSync(SCRIPT_PATH, 'utf8')
-// 状態ファイルへの書き込みの jq の式は同梱スクリプト（scripts/state-write.sh）にある（利用側のリポジトリで観測した権限確認によるランの停止への対応）
-const STATE_WRITE = readFileSync(join(dirname(SCRIPT_PATH), 'state-write.sh'), 'utf8')
+// 状態ファイルの初期化（create）の jq の式は同梱スクリプト（scripts/state.sh）にある（利用側のリポジトリで観測した権限確認によるランの停止への対応）
+const STATE_SH = readFileSync(join(dirname(SCRIPT_PATH), 'state.sh'), 'utf8')
 const markerIndex = source.indexOf(DRIVER_MARKER)
 if (markerIndex < 0) {
   throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
@@ -179,13 +179,13 @@ test('配線: remeasureResidualBytesNow の raiseAndPersistHighWater(avgActualBy
   }
 })
 
-test('配線: loadState() の初期 JSON（state-write.sh create）に perWorktreeByteReserveHighWater が含まれる', () => {
-  assert.match(STATE_WRITE, /perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: \$v/)
+test('配線: loadState() の初期 JSON（state.sh create）に perWorktreeByteReserveHighWater が含まれる', () => {
+  assert.match(STATE_SH, /perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: \$v/)
 })
 
 test('配線: loadState() の初期 JSON テンプレートに perWorktreeByteReserveHighWaterVersion が現行版で含まれる（Issue #496）', () => {
   // 版はホストが create の引数で渡す（現行版の定数）
-  assert.match(source, /scriptCommand\('state-write\.sh', ` create \$\{STATE_FILE\} \$\{parent\} \$\{baseBranch\} \$\{concurrency\} \$\{HIGH_WATER_SCHEMA_VERSION\}`\)/)
+  assert.match(source, /scriptCommand\('state\.sh', ` --file \$\{STATE_FILE\} create --base \$\{baseBranch\} --parallel \$\{concurrency\} --version \$\{HIGH_WATER_SCHEMA_VERSION\}`\)/)
 })
 
 test('配線: savedItems 取得が loadState() の分割代入へ変更され highWaterBytes・highWaterVersion を受け取る', () => {

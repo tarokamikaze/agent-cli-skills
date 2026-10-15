@@ -18,6 +18,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { hashPrecheckReply } from './lib/signed-output.mjs'
+import { requestedNumbers } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const rawSource = readFileSync(SCRIPT_PATH, 'utf8')
@@ -57,12 +58,12 @@ async function run(baseMergeReply, { monitorReply = () => ({ state: 'conflicting
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
-      const nums = /for n in ([0-9 ]+); do/.exec(prompt)[1].trim().split(' ').map(Number)
+      const nums = requestedNumbers(prompt)
       return { entries: nums.map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
     }
     if (label.startsWith('plan:root-ancestors')) return { fetched: true, chain: [{ number: 1, parent: 0 }] }
     if (label.startsWith('plan:out-of-tree-deps')) {
-      const nums = /for n in ([0-9 ]+); do/.exec(prompt)[1].trim().split(' ').map(Number)
+      const nums = requestedNumbers(prompt)
       return { entries: nums.map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
     }
     if (label === 'worktree:orphan-scan') return { entries: [{ path: '/repo', branch: 'main', isMain: true }] }

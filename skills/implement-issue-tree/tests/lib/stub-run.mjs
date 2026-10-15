@@ -53,7 +53,17 @@ function buildTree(leaves) {
  * 測定スクリプトを使わない最小の引数（残置上限の両軸を無効化する）。skillDir は dryRun 以外で必須（Issue #603）。
  * stub agent は測定・観測スクリプトを実行しないため、値は検証を通る形式のダミーでよい。
  */
-export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: '/repo/.claude/skills/implement-issue-tree' }
+export const STUB_SKILL_DIR = '/repo/.claude/skills/implement-issue-tree'
+export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
+
+/**
+ * 依存宣言・ツリー外前提の取得プロンプト（probe-declared-deps.sh / probe-prereqs.sh を起動する 1 コマンド）から、
+ * ホストが依頼した番号の並びを取り出す。コマンドが無ければ null。
+ */
+export function requestedNumbers(prompt) {
+  const m = /(?:probe-declared-deps|probe-prereqs)\.sh((?: [0-9]+)+)$/m.exec(prompt)
+  return m ? m[1].trim().split(' ').map(Number) : null
+}
 
 /**
  * @param {{ args: object, leaves?: number[], override?: (label: string, opts: object, prompt: string) => any }} params
@@ -77,13 +87,11 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {
-      const m = /for n in ([0-9 ]+); do/.exec(prompt)
-      return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
+      return { entries: requestedNumbers(prompt).map((x) => ({ number: x, deps: [], sig: declaredDepsChecksum(x, []) })) }
     }
     if (label.startsWith('plan:root-ancestors')) return { fetched: true, chain: [{ number: args.parent, parent: 0 }] }
     if (label.startsWith('plan:out-of-tree-deps')) {
-      const m = /for n in ([0-9 ]+); do/.exec(prompt)
-      return { entries: m[1].trim().split(' ').map(Number).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
+      return { entries: requestedNumbers(prompt).map((x) => ({ number: x, state: 'OPEN', sig: outOfTreeStateChecksum(x, 'OPEN') })) }
     }
     if (label === 'worktree:orphan-scan') return { entries: [{ path: '/repo', branch: 'main', isMain: true }] }
     if (label === 'worktree:record-count') return { count: 1 }
@@ -91,7 +99,8 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (label.startsWith('impl:#')) return { branch: `feat/${n}-x`, summary: 's', worktreePath: `/repo/wt/${n}` }
     // セキュリティ専用の Review（args.securityReview）も既定は ok（通常の Review と同じスキーマ）
     if (label.startsWith('review:#') || label.startsWith('security-review:#')) return { state: 'ok', highestSeverity: 'none', summary: 's', worktreePath: `/repo/wt/r${n}` }
-    if (label.startsWith('fix:#')) return { pushed: false, summary: 'fixed', worktreePath: `/repo/wt/f${n}` }
+    // branchSynced は Review ループの fix の申告（fix のコミットをブランチに載せた）。Merge ループの fix は読まない。
+    if (label.startsWith('fix:#')) return { pushed: false, summary: 'fixed', worktreePath: `/repo/wt/f${n}`, branchSynced: true, fixHeadSha: 'c'.repeat(40) }
     if (label.startsWith('pr-create:#')) return { prNumber: 1000 + n, summary: 's', worktreePath: `/repo/wt/p${n}`, checksStarted: true, mergeableAfterPush: 'MERGEABLE' }
     if (label.startsWith('pr-bind:#')) return { state: 'OPEN', headRefOid: 'a'.repeat(40), headRefName: `feat/${n}-x`, baseRefName: 'main', isCrossRepository: false, closingIssues: [n] }
     if (label.startsWith('merge:#')) return { state: 'blocked', blockedReason: 'quality', summary: '監視中断', unresolvedComments: [] }

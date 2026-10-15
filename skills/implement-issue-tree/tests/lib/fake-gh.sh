@@ -1,5 +1,5 @@
 #!/bin/bash
-# fake-gh.sh — テスト用の偽の gh（issue-scripts.test.mjs・ci-scripts.test.mjs・g0-check.test.mjs が PATH の先頭に gh として置く）
+# fake-gh.sh — テスト用の偽の gh（issue-scripts.test.mjs・ci-scripts.test.mjs が PATH の先頭に gh として置く）
 #
 # 引数から fixture のファイル名（$FAKE_GH_DIR/<key>.json）を決め、--jq があれば本物の jq（-r -c。gh の --jq と同じく
 # 文字列は生、値は 1 行の JSON）で適用して出す。

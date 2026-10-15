@@ -19,6 +19,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { hashPrecheckReply, signedReply } from './lib/signed-output.mjs'
+import { requestedNumbers } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')

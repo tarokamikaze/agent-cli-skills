@@ -22,6 +22,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { hashPrecheckReply } from './lib/signed-output.mjs'
+import { requestedNumbers, STUB_SKILL_DIR } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
   dirname(fileURLToPath(import.meta.url)),
@@ -189,15 +190,23 @@ test('writeBlockedStateBatch: 同一 patch は numbers へ束ね、PR を持つ�
   assert.equal('pr' in groups[1].patch, false, '保存済み pr を消さない')
 })
 
-test('writeBlockedStateBatch: プロンプトは state.sh の起動コマンド（nonce 付きの終端のヒアドキュメント）を渡し、jq の手順を書かない', async () => {
+test('writeBlockedStateBatch: プロンプトは JSON を Write ツールで入力ファイルへ書かせ、state.sh を照合値付きで起動する（ヒアドキュメント・jq の手順を書かない）', async () => {
   const { calls } = installAgentStub(() => ({ ok: true }))
   await writeBlockedStateBatch(entriesOf(1, 2, BLOCKED), {})
   const p = calls[0].prompt
   assert.match(p, /非信頼データの取り扱い規則/)
   assert.match(p, /一時ファイル配置規則/)
-  assert.match(p, /run-verified\.sh' @@SCRIPT_SHA256:state\.sh@@ state\.sh --file _\/issue-trees\/1\.json merge <<'STATE_EOF_[0-9a-z]+'\n/)
-  assert.match(p, /\n\[\{"numbers":\[1,2\],"patch":\{[^\n]*\}\}\]\nSTATE_EOF_[0-9a-z]+\n/)
-  assert.doesNotMatch(p, /jq --|slurpfile|mv "\$tmp"/)
+  const m = /run-verified\.sh' @@SCRIPT_SHA256:state\.sh@@ state\.sh --file _\/issue-trees\/1\.json merge --input-nonce ([0-9a-z]+) --input-sha ([0-9a-f]{64})\n/.exec(p)
+  assert.ok(m, p)
+  const [, nonce, sha] = m
+  const data = p.split('\n').find((l) => l.startsWith('[{"numbers":[1,2],"patch":{'))
+  assert.ok(data)
+  // 照合値は nonce・モード・JSON に束縛される（state.sh の --input-sha と同じ定義）
+  assert.equal(sha, sha256Hex(`${nonce}\nmerge\n${data}`))
+  assert.ok(p.includes(`Write ツールで、カレントディレクトリ（メイン worktree）の _/issue-trees/1.json.input-${nonce}.json に`))
+  // JSON は境界の内側にだけ置き、nonce を含めない（境界の偽装を防ぐ）
+  assert.equal(data.includes(nonce), false)
+  assert.doesNotMatch(p, /<<'|jq --|slurpfile|mv "\$tmp"/)
 })
 
 test('writeBlockedStateBatch: haiku が未返却なら同一プロンプトで sonnet へ 1 回フォールバックする（#493 の対象に含まれる）', async () => {

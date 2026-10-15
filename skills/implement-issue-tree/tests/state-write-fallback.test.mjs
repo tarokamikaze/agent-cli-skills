@@ -196,7 +196,7 @@ test('(g) マージは成功、掃除段の haiku が例外 → 掃除段だけ 
   }
 })
 
-test('(g2) 掃除プロンプトは worktree-remove.sh の 1 コマンドと、worktree が無くなったときだけ行う .worktree のクリア（state.sh merge）から成る。追跡中の worktree と別物を消すとき（preserveWorktreeField・新パス記録済み）はクリアしない', async () => {
+test('(g2) 掃除プロンプトは worktree-remove.sh の 1 コマンドと、worktree が無くなったときだけ行う .worktree のクリア（state.sh clear-worktree）から成る。追跡中の worktree と別物を消すとき（preserveWorktreeField・新パス記録済み）はクリアしない', async () => {
   const run = async (patch, options) => {
     const { calls } = installAgentStub(() => ({ ok: true, retained: false }))
     assert.equal(await updateState(108, patch, options), true)
@@ -205,8 +205,9 @@ test('(g2) 掃除プロンプトは worktree-remove.sh の 1 コマンドと、w
   const cleared = await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108' })
   assert.match(cleared, /worktree-remove\.sh remove --mode superseded --path '\/tmp\/wt-108'\n/)
   assert.match(cleared, /結果の worktree が removed \/ not-registered \/ skipped のときだけ（それ以外は実行しない）/)
-  assert.match(cleared, /state\.sh --file _\/issue-trees\/1\.json merge <<'STATE_EOF'\n\[\{"numbers":\[108\],"patch":\{"worktree":""\}\}\]\nSTATE_EOF\n/)
-  assert.doesNotMatch(cleared, /jq --argjson patch/)
+  assert.match(cleared, /state\.sh --file _\/issue-trees\/1\.json clear-worktree --issue 108\n/)
+  // JSON（{} と引用符）・ヒアドキュメントをコマンド行に載せない
+  assert.doesNotMatch(cleared, /jq --argjson patch|<<'/)
   assert.doesNotMatch(await run({ status: 'merged', worktree: '/tmp/wt-108-new' }, { cleanupWorktree: '/tmp/wt-108' }), /state\.sh/)
   assert.doesNotMatch(await run({ status: 'merged' }, { cleanupWorktree: '/tmp/wt-108', preserveWorktreeField: true }), /state\.sh/)
 })
@@ -240,7 +241,8 @@ test('(h0) initAllPending は open が 0 件のとき state.sh init を呼ばな
   assert.equal(logs.filter((l) => /一括初期化/.test(l)).length, 0)
   await initAllPending([{ number: 3, kind: 'verify-close' }])
   assert.equal(calls.length, 1)
-  assert.match(calls[0].prompt, /init <<'STATE_EOF_/)
+  assert.match(calls[0].prompt, / init --input-nonce [0-9a-z]+ --input-sha [0-9a-f]{64}\n/)
+  assert.ok(calls[0].prompt.includes('\n[{"number":3,"type":"verify-close"}]\n'))
 })
 
 test('(h) initAllPending は haiku・sonnet とも失敗しても reject しない', async () => {

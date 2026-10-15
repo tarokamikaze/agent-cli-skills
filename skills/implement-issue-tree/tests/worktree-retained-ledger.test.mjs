@@ -210,7 +210,8 @@ function overrides({ oldFixResult, firstFixResult = GONE, fixRounds = 2, fixPath
     }
     if (label === 'fix:#2') {
       seen.fix += 1
-      return { pushed: false, summary: 'fixed', worktreePath: fixPaths[seen.fix - 1] ?? FIX_B }
+      // branchSynced: Review ループの fix がコミットをブランチに載せたことの申告（無いとホストが blocked で止める）
+      return { pushed: false, summary: 'fixed', worktreePath: fixPaths[seen.fix - 1] ?? FIX_B, branchSynced: true, fixHeadSha: 'c'.repeat(40) }
     }
     if (label === 'state:cleanup:#2') {
       seen.cleanup += 1

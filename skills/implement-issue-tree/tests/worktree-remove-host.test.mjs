@@ -258,7 +258,7 @@ test('discard で .worktree を空にする patch は JSON マージに含めず
   const merge = d.calls.find((c) => c.opts.label === 'state:update:#35')
   assert.match(merge.prompt, /"branch":"feat\/35-x"/)
   assert.doesNotMatch(merge.prompt, /"worktree"/, 'worktree を空にする更新を先に書かない')
-  assert.match(d.calls.find((c) => c.opts.label === 'state:cleanup:#35').prompt, /"worktree":""/, '手順 2 が worktree の無くなったときだけ空にする')
+  assert.match(d.calls.find((c) => c.opts.label === 'state:cleanup:#35').prompt, / state\.sh --file _\/issue-trees\/1\.json clear-worktree --issue 35\n/, '手順 2 が worktree の無くなったときだけ空にする')
 
   const sp = stub(() => ({ ok: true, retained: false }))
   await f.updateStateDetailed(36, { status: 'merged', worktree: '' }, { cleanupWorktree: '/tmp/wt-36' })

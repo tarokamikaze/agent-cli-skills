@@ -1371,7 +1371,7 @@ function subjectDecisionRules(failPre, failPost) {
 // 修正のコミット、PR のタイトルと本文の文面。検証権限を持たない自動 base 取り込みは scripts/base-merge.sh が行う（埋め込み subject・
 // コンフリクトは解消せず fix 経路へ委譲。Issue #603 第 3 弾）。
 function prPushCommand(rest) {
-  return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['pr-push.sh']} pr-push.sh${rest}`
+  return cmd(`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['pr-push.sh']} pr-push.sh${rest}`)
 }
 function prPushBlock(rest) {
   return `\`\`\`sh\n${prPushCommand(rest)}\n\`\`\``
@@ -3238,7 +3238,8 @@ async function loadState() {
         ? `4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。` +
           `ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
         : `4. 出力が NOFILE の場合: 次を実行して初期ファイルを作る: ` +
-          `${stateCommand('create', ` --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}` +
+          // 読み込みの手順（state-read.sh）と同じく、組み立てで例外にしない scriptCommand を使う（skillDir の必須は駆動部冒頭が検査する）
+          `${scriptCommand('state.sh', ` --file ${STATE_FILE} create --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}` +
           `。標準出力の最後の行が STATE_RESULT で ok が true なら ok: true, fileExisted: false, items: {}, highWaterBytes: 0,` +
           ` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION}。それ以外は ok: false, fileExisted: false, items: {},` +
           ` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
@@ -3974,7 +3975,7 @@ function scriptCommand(name, rest = '') {
 // null にする）
 function scriptInvocation(name, nonce, rest) {
   if (!skillDir) throw new Error('args.skillDir が未指定のため測定スクリプトの場所を決められない')
-  return `bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name}${nonce === undefined ? '' : ` --nonce ${nonce}`}${rest}`
+  return cmd(`bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name}${nonce === undefined ? '' : ` --nonce ${nonce}`}${rest}`)
 }
 
 // 状態ファイルの書き込み（scripts/state.sh。Issue #603 第 5 弾）。mktemp → jq → mv の手順はスクリプトが持ち、エージェントは
@@ -4188,7 +4189,7 @@ async function precheckScriptHashes() {
   for (let attempt = 0; attempt < HASH_PRECHECK_MAX_ATTEMPTS; attempt += 1) {
     const nonce = boundaryNonce(`hash-precheck:${attempt}:${table}`)
     const delimiter = `HASHESEOF_${nonce}`
-    const command = [`bash '${skillDir}/scripts/run-verified.sh' --verify-only --nonce ${nonce} <<'${delimiter}'`, table, delimiter].join('\n')
+    const command = cmd([`bash '${skillDir}/scripts/run-verified.sh' --verify-only --nonce ${nonce} <<'${delimiter}'`, table, delimiter].join('\n'))
     let v
     try {
       v = await agent(
@@ -4257,11 +4258,11 @@ async function measureResidualBytesOnce(sanitizedPaths, model) {
   const tmpNonce = boundaryNonce(`residual-bytes-tmp:${residualByteMeasureCallSeq}:${pathLines}`)
   const delimiter = `PATHSEOF_${tmpNonce}`
   if (pathLines.includes(delimiter)) return { error: true }
-  const command = [
+  const command = cmd([
     scriptInvocation('measure-residual-bytes.sh', tmpNonce, ` <<'${delimiter}'`),
     pathLines,
     delimiter,
-  ].join('\n')
+  ].join('\n'))
   // agent() の例外のみ捕捉する（Issue #571）。一過性のエージェント失敗として呼び出し側が再測定する。
   // boundaryNonce・scriptInvocation 等の決定的な内部例外は包まず、外側 catch の null（fail-closed）に任せる。
   let v
@@ -4861,7 +4862,7 @@ async function sweepClosedWorktrees(orphanPaths = []) {
     const candidatesJson = JSON.stringify(candidates)
     const nonce = boundaryNonce(`worktree-sweep:${candidatesJson}`)
     const delimiter = `SWEEP_EOF_${nonce}`
-    const command = `${scriptInvocation('worktree-remove.sh', undefined, ` sweep --file ${STATE_FILE}`)} <<'${delimiter}'\n${candidatesJson.split(nonce).join('')}\n${delimiter}`
+    const command = cmd(`${scriptInvocation('worktree-remove.sh', undefined, ` sweep --file ${STATE_FILE}`)} <<'${delimiter}'\n${candidatesJson.split(nonce).join('')}\n${delimiter}`)
     const v = await agent(
       [
         'worktree スイープタスク（ラン終了時の残骸回収）。',
@@ -5497,7 +5498,7 @@ function observeCommand(nonce, f, attempt = 0) {
   ].join('')
   // skillDir・nonce が未指定の呼び出し（プロンプトの文面だけを検査する単体テスト）はプレースホルダを書く。実ランでは駆動部冒頭の
   // 検証（skillDir）と駆動部の nonce 生成で必ず値が入り、プレースホルダのままならスクリプトが exit 2 で拒否する（fail-closed）。
-  return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['observe-pr.sh']} observe-pr.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`
+  return cmd(`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['observe-pr.sh']} observe-pr.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`)
 }
 
 // monitor が転記したチェック総数の封筒を照合し、結果の checksTotal を封筒由来の値へ置き換えた monitor 結果を返す
@@ -5696,7 +5697,7 @@ function mergeGateCommand(nonce, pr, expectSha, external) {
     expectSha !== '' ? ` --expect-sha ${expectSha}` : '',
     external !== '' ? ` --external ${shellSingleQuote(external)}` : '',
   ].join('')
-  return `bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['merge-gate.sh']} merge-gate.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`
+  return cmd(`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['merge-gate.sh']} merge-gate.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`)
 }
 // merge-exec が転記した封筒を照合し、新規マージ（reason: merged）の受理に使えるかを返す（純粋関数）。通る条件は、封筒の nonce・
 // sha256・入力が送ったものと一致し、verdict が ok（取得失敗でない・最終段階まで到達）で、封筒の HEAD sha が merge-exec 申告の
@@ -5753,7 +5754,8 @@ function mergeExecutePrompt(item, impl, allowMerge, externalCheckEntries, expect
     // --match-head-commit により TOCTOU と誤 sha は GitHub 側で拒否される。
     // false（回復専用経路）は gh pr merge を一切出力しない。
     allowMerge
-      ? `3. 手順 2 が ok の場合のみ、次のコマンドで squash merge を実行する（このコマンド形以外でのマージ実行は禁止）: HEAD_SHA="<payload.headSha の 40 桁>"; gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit "$HEAD_SHA"。マージが成功したらイシュークローズ確認を行い merged: true / reason: merged / headSha: payload.headSha を返す。マージコマンドが失敗した場合は merged: false / reason: merge-failed を返す（summary に失敗した事実のみを書き、エラー出力の本文は転記しない）。手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）はマージを実行せずイシュークローズ確認だけを行い merged: true / reason: already-merged を返す:`
+      // マージは変数の代入・引用符・連結なしの単独のコマンドにする（利用側の権限確認・hook が、; での連結と変数を含む形を止めうるため）
+      ? `3. 手順 2 が ok の場合のみ、次のコマンドを 1 回の Bash 呼び出しで単独で実行して squash merge する（このコマンド形以外でのマージ実行は禁止。<HEAD sha> は payload.headSha の 40 桁の値そのものに置き換えて直接書く — 変数への代入・引用符・&& / ; でのほかのコマンドとの連結はしない）: ${cmd(`gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit <HEAD sha>`)}。マージが成功したらイシュークローズ確認を行い merged: true / reason: merged / headSha: payload.headSha を返す。マージコマンドが失敗した場合は merged: false / reason: merge-failed を返す（summary に失敗した事実のみを書き、エラー出力の本文は転記しない）。手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）はマージを実行せずイシュークローズ確認だけを行い merged: true / reason: already-merged を返す:`
       : `3. gh pr merge は実行しない（本ランではクライアント側の自動マージを行わない。マージは GitHub 上で人間が行うか、サーバー側 auto-merge workflow が行う）。手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）のみ本手順に到達し、イシュークローズ確認だけを行って merged: true / reason: already-merged を返す。MERGED でなければ手順 1・2 の指示どおり merged: false を返す:`,
     issueCloseLine,
     `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,

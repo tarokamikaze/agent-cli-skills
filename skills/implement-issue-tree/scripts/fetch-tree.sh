@@ -31,7 +31,7 @@
 #   1  取得の失敗または件数の不一致がある（出力済みの NODE 行は残る。ホストも同じ照合で停止する）
 #   2  使い方の誤り
 # 互換: macOS（BSD userland・bash 3.2）と Linux（GNU）。連想配列・mapfile を使わない。
-# 副作用: 自分で作った一時ディレクトリだけ（終了時に消す）。
+# 副作用: 自分で作った一時ファイルだけ（終了時に消す）。
 
 set -u
 LC_ALL=C
@@ -50,8 +50,20 @@ usage() {
 root=$1
 sf_valid_pos_int "${root}" || usage
 
-work=$(mktemp -d) || exit 1
-trap 'rm -rf -- "${work}"' EXIT
+# 一時ファイルは 1 つずつ作って 1 つずつ消す（再帰削除を持たない。scripts/ の静的ガードが rm -r を禁じる）
+queue=""
+open_nodes=""
+children=""
+# shellcheck disable=SC2329  # trap 経由で呼ばれる
+cleanup() {
+  [ -z "${queue}" ] || rm -f -- "${queue}"
+  [ -z "${open_nodes}" ] || rm -f -- "${open_nodes}"
+  [ -z "${children}" ] || rm -f -- "${children}"
+}
+trap cleanup EXIT
+queue=$(mktemp) || exit 1
+open_nodes=$(mktemp) || exit 1
+children=$(mktemp) || exit 1
 
 # 1 行 = 番号 タブ state タブ total タブ タイトル（@tsv）
 NODE_JQ='[.number, .state, (.sub_issues_summary.total // 0), .title] | @tsv'
@@ -59,10 +71,6 @@ OPTIN_JQ='[(.body // "") | scan("<!--[ \t]*optin-tests:[ \t]*([^\n]*?)[ \t]*-->"
 TAB=$(printf '\t')
 status=0
 count=0
-queue="${work}/queue"
-: >"${queue}"
-open_nodes="${work}/open"
-: >"${open_nodes}"
 visited=" ${root} "
 
 emit() {
@@ -91,7 +99,6 @@ while :; do
   i=$((i + 1))
   parent=${entry%%"${TAB}"*}
   want=${entry#*"${TAB}"}
-  children="${work}/children"
   got=-1
   attempt=0
   while [ "${attempt}" -lt 3 ]; do

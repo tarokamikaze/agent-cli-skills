@@ -1371,7 +1371,7 @@ return`対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* 
 
 
 function prPushCommand(rest){
-return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['pr-push.sh']} pr-push.sh${rest}`
+return cmd(`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['pr-push.sh']} pr-push.sh${rest}`)
 }
 function prPushBlock(rest){
 return`\`\`\`sh\n${prPushCommand(rest)}\n\`\`\``
@@ -3238,7 +3238,8 @@ readOnly
 ?`4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。`+
 `ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
 :`4. 出力が NOFILE の場合: 次を実行して初期ファイルを作る: `+
-`${stateCommand('create', ` --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}`+
+
+`${scriptCommand('state.sh', ` --file ${STATE_FILE} create --base ${baseBranch} --parallel ${concurrency} --version ${HIGH_WATER_SCHEMA_VERSION}`)}`+
 `。標準出力の最後の行が STATE_RESULT で ok が true なら ok: true, fileExisted: false, items: {}, highWaterBytes: 0,`+
 ` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION}。それ以外は ok: false, fileExisted: false, items: {},`+
 ` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
@@ -3938,27 +3939,27 @@ return''
 
 
 const SCRIPT_SHA256={
-'measure-residual-bytes.sh':'d4decf5adbfa6a232103b932b2c7d72328d8f2ecb22d6d523072d68ace01a837',
-'measure-free-disk.sh':'3d15f94384920211f69d331e6e23fd8a588828ddac572ed05e13f051d0217fe9',
-'observe-pr.sh':'9fa5eaa1753afb1f785c942912e6efe27c207dd653e28d0ca96126a17f2d23ad',
-'base-merge.sh':'aada08a5e5f752c04fe27a8464a944ab8b4f6d8cb915e1e3450250f9f2edfe73',
-'pr-push.sh':'01920a03ffc1c2e4ce8907b89975c5bfb680229d7941ebc8a3ce5f9adf425a69',
-'state.sh':'2dd930fab0a8b1424136d7eaed21eeb2c38fe37f369610925fe420bd46aa0bdb',
-'merge-gate.sh':'b4338aeeb056a72b023d26e50b52fc04edd01ad6265e0576d33a6b5d43d63f37',
-'worktree-remove.sh':'b1d5f283860554ab730421d23be0e53f2d14d461e3d819cd509ebf5a6a3e6e9a',
-'recover-prep.sh':'d6a325ce6483315788b1383f65b0de715274c2f72e9a3d396db7b9aa8624eeca',
+'measure-residual-bytes.sh':'123a9e96d6ec2d1c842f6d2dc5f7988f144a9af376a99e579967ca3b31993f97',
+'measure-free-disk.sh':'593b801407896687eecaa42e2e63cd860a25fadabc28770950561bdef46218cc',
+'observe-pr.sh':'63b5d097a96ffe9a2db9d299543e1df6beed631e17eeb76a23be27b90f2225b5',
+'base-merge.sh':'ffe56ce33a6211e37dd57c82c8fbd6701634e63931b41b8d8024e172458f4ac5',
+'pr-push.sh':'293b91e41d310984938b238fe069e8681f26c296d5b7eca662d84791682559ff',
+'state.sh':'c509695df322f1d4aca0e23a75b1a157d520201c37208aec61cfdbbc59bfc1dd',
+'merge-gate.sh':'af04c1419b77dceaba719186a9a5f85cb9c86d10acfd5501cd2b75f88926549b',
+'worktree-remove.sh':'d843299f17225500209d4de105f20f3dd33606394a4a11525727aeac4f82c49c',
+'recover-prep.sh':'07a51fe58ee7ad2eb76bb298fbd998e22e19e0fba2c1e2294fd4336c9cebc6a4',
 
 
 
-'state-read.sh':'66fe416b9c01b39c6ff3369d6023ee7a6b3be27137158c32313878adf5a7ce13',
-'state-verify.sh':'6b5ede762087a46cc3958f555b4e5be329bed3d79abf5de5cb84a5297f9d29ca',
-'fetch-tree.sh':'0cf0b4bad3c9b58cf23440f00257c7ffbd51eb8cc1e9db0a19ae0829f663662b',
-'fetch-root-ancestors.sh':'af591efe2d16660f65238cff61990c3791423115b922e595feff56ec582058b7',
-'probe-declared-deps.sh':'e4b025fbf86218fe7640d97662d33a68d2a790c9835fcc9feeb3990faf8f9e70',
-'probe-prereqs.sh':'95f329731f4aff15d2936c7ed48ad4b54663ef58b571cb40ecf172036b0f1826',
-'detect-external-checks.sh':'a919d9e39744abbd6bb6a111b7c493519c04d09181168f6e93cf47849c886602',
-'nonce-seed.sh':'776a0d686f96511515177299db607353963fedaf549263935177b88781e172d7',
-'compare-files.sh':'700fda12e6e2e28a6067945a22e3ce426f70b15f135bf557418b7a6f546e9814',
+'state-read.sh':'0a5bc4003ad6d7cad1f2fe6252213362478ac92a14e4fdbeab8417a09582cbbb',
+'state-verify.sh':'b130d9b2180b9228dc9dae97faf807b74b08667782b1b4f40207d0f63acb41fc',
+'fetch-tree.sh':'122a05a31c59a110e9b05dbfe14886d297ffe7c63593063112fccf9d78132b67',
+'fetch-root-ancestors.sh':'079deda17586ae033c4c3e3450065d10e1b0e5dc46f55ec1a32eff63091fd372',
+'probe-declared-deps.sh':'391cab7f8336db54fc99ee52371cacc49d91480a0e7bd65a5da3db8ce1b8c4de',
+'probe-prereqs.sh':'ea3951ccc8a45fbe45558bbdafca96d7fe2766e5cc214be8c1421e053df82b11',
+'detect-external-checks.sh':'10221886c372e0624d8b5a90b2e269bf8c9f2dce52c47a22852ac332a4e29a67',
+'nonce-seed.sh':'5ecae35693a7675db936c3a0cc90eb2c0c7e40d2f520144a4c5b8791c5b7e9bd',
+'compare-files.sh':'c50b63e709484a793a23256e94e0920fa2f9d3eaa60a748c53594cad3fbfcc1c',
 }
 
 
@@ -3974,7 +3975,7 @@ return cmd(`bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${
 
 function scriptInvocation(name,nonce,rest){
 if(!skillDir)throw new Error('args.skillDir が未指定のため測定スクリプトの場所を決められない')
-return`bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name}${nonce === undefined ? '' : ` --nonce ${nonce}`}${rest}`
+return cmd(`bash '${skillDir}/scripts/run-verified.sh' ${SCRIPT_SHA256[name]} ${name}${nonce === undefined ? '' : ` --nonce ${nonce}`}${rest}`)
 }
 
 
@@ -4188,7 +4189,7 @@ let last=''
 for(let attempt=0;attempt<HASH_PRECHECK_MAX_ATTEMPTS;attempt+=1){
 const nonce=boundaryNonce(`hash-precheck:${attempt}:${table}`)
 const delimiter=`HASHESEOF_${nonce}`
-const command=[`bash '${skillDir}/scripts/run-verified.sh' --verify-only --nonce ${nonce} <<'${delimiter}'`,table,delimiter].join('\n')
+const command=cmd([`bash '${skillDir}/scripts/run-verified.sh' --verify-only --nonce ${nonce} <<'${delimiter}'`,table,delimiter].join('\n'))
 let v
 try{
 v=await agent(
@@ -4257,11 +4258,11 @@ residualByteMeasureCallSeq+=1
 const tmpNonce=boundaryNonce(`residual-bytes-tmp:${residualByteMeasureCallSeq}:${pathLines}`)
 const delimiter=`PATHSEOF_${tmpNonce}`
 if(pathLines.includes(delimiter))return{error:true}
-const command=[
+const command=cmd([
 scriptInvocation('measure-residual-bytes.sh',tmpNonce,` <<'${delimiter}'`),
 pathLines,
 delimiter,
-].join('\n')
+].join('\n'))
 
 
 let v
@@ -4861,7 +4862,7 @@ return[]
 const candidatesJson=JSON.stringify(candidates)
 const nonce=boundaryNonce(`worktree-sweep:${candidatesJson}`)
 const delimiter=`SWEEP_EOF_${nonce}`
-const command=`${scriptInvocation('worktree-remove.sh', undefined, ` sweep --file ${STATE_FILE}`)} <<'${delimiter}'\n${candidatesJson.split(nonce).join('')}\n${delimiter}`
+const command=cmd(`${scriptInvocation('worktree-remove.sh', undefined, ` sweep --file ${STATE_FILE}`)} <<'${delimiter}'\n${candidatesJson.split(nonce).join('')}\n${delimiter}`)
 const v=await agent(
 [
 'worktree スイープタスク（ラン終了時の残骸回収）。',
@@ -5497,7 +5498,7 @@ attempt>0?(f.mode==='pr'?' --wait':` --wait --attempt ${attempt}`):'',
 ].join('')
 
 
-return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['observe-pr.sh']} observe-pr.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`
+return cmd(`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['observe-pr.sh']} observe-pr.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`)
 }
 
 
@@ -5696,7 +5697,7 @@ repoArg!==''?` --repo ${repoArg}`:'',
 expectSha!==''?` --expect-sha ${expectSha}`:'',
 external!==''?` --external ${shellSingleQuote(external)}`:'',
 ].join('')
-return`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['merge-gate.sh']} merge-gate.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`
+return cmd(`bash '${skillDir || '<skillDir>'}/scripts/run-verified.sh' ${SCRIPT_SHA256['merge-gate.sh']} merge-gate.sh --nonce ${nonce || 'NONCE_NOT_PROVIDED'}${rest}`)
 }
 
 
@@ -5753,7 +5754,8 @@ allowMerge
 
 
 allowMerge
-?`3. 手順 2 が ok の場合のみ、次のコマンドで squash merge を実行する（このコマンド形以外でのマージ実行は禁止）: HEAD_SHA="<payload.headSha の 40 桁>"; gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit "$HEAD_SHA"。マージが成功したらイシュークローズ確認を行い merged: true / reason: merged / headSha: payload.headSha を返す。マージコマンドが失敗した場合は merged: false / reason: merge-failed を返す（summary に失敗した事実のみを書き、エラー出力の本文は転記しない）。手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）はマージを実行せずイシュークローズ確認だけを行い merged: true / reason: already-merged を返す:`
+
+?`3. 手順 2 が ok の場合のみ、次のコマンドを 1 回の Bash 呼び出しで単独で実行して squash merge する（このコマンド形以外でのマージ実行は禁止。<HEAD sha> は payload.headSha の 40 桁の値そのものに置き換えて直接書く — 変数への代入・引用符・&& / ; でのほかのコマンドとの連結はしない）: ${cmd(`gh pr merge ${impl.prNumber} --squash --delete-branch --match-head-commit <HEAD sha>`)}。マージが成功したらイシュークローズ確認を行い merged: true / reason: merged / headSha: payload.headSha を返す。マージコマンドが失敗した場合は merged: false / reason: merge-failed を返す（summary に失敗した事実のみを書き、エラー出力の本文は転記しない）。手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）はマージを実行せずイシュークローズ確認だけを行い merged: true / reason: already-merged を返す:`
 :`3. gh pr merge は実行しない（本ランではクライアント側の自動マージを行わない。マージは GitHub 上で人間が行うか、サーバー側 auto-merge workflow が行う）。手順 1 で state が MERGED だった場合（前回ランのマージ済み PR の回復、またはサーバー側 auto-merge によるマージ完了）のみ本手順に到達し、イシュークローズ確認だけを行って merged: true / reason: already-merged を返す。MERGED でなければ手順 1・2 の指示どおり merged: false を返す:`,
 issueCloseLine,
 `   他のイシューが並列実行中のため、working copy のブランチ切り替えや git pull は行わない。`,
