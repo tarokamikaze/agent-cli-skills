@@ -1,5 +1,4 @@
-// Write ツールで書く一時ファイル（.implement-issue-tree-<nonce>.md・<状態ファイル>.patch-<nonce>.json・
-// <状態ファイル>.sweep-<nonce>.json）を git の除外設定に載せる scripts/worktree-exclude.sh の回帰テスト（Issue #21）。
+// Write ツールで書く一時ファイル（.implement-issue-tree-<nonce>.md・<状態ファイル>.input-<nonce>.json）を git の除外設定に載せる scripts/worktree-exclude.sh の回帰テスト（Issue #21）。
 //
 // 一時ファイルは同梱スクリプトが読んで消すが、スクリプトを起動できなかった経路では残る。git add の前に消す手順
 // （WRITTEN_FILE_COMMIT_GUARD）は agent が手順に従うことと、カレントディレクトリが作業ツリーのルートであることに
@@ -25,17 +24,16 @@ import { importDefinitions } from './lib/stub-run.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, '..', 'scripts', 'worktree-exclude.sh')
 const BASHES = availableBashes()
-const PATTERNS = ['.implement-issue-tree-*.md', '/_/issue-trees/*.json.patch-*.json', '/_/issue-trees/*.json.sweep-*.json']
-// 作業ツリーのルートからの相対パス。ホストが作る一時ファイル（Write の .md はカレントディレクトリ、patch・sweep は
+const PATTERNS = ['.implement-issue-tree-*.md', '/_/issue-trees/*.json.input-*.json']
+// 作業ツリーのルートからの相対パス。ホストが作る一時ファイル（Write の .md はカレントディレクトリ、state.sh の入力ファイルは
 // 状態ファイル _/issue-trees/<parent>.json の隣）
 const TEMP_FILES = [
-  '.implement-issue-tree-0123abcd.md', 'sub/.implement-issue-tree-0123abcd.md',
-  '_/issue-trees/7.json.patch-0123abcd.json', '_/issue-trees/7.json.sweep-0123abcd.json',
+  '.implement-issue-tree-0123abcd.md', 'sub/.implement-issue-tree-0123abcd.md', '_/issue-trees/7.json.input-0123abcd.json',
 ]
 // 利用者のファイル（除外しない）。パターンを広く取ると、ランのあとも黙って無視され続ける
 const USER_FILES = [
-  '_/issue-trees/7.json', 'release.patch-notes.json', 'sub/x.json.patch-1.json', 'sub/_/issue-trees/7.json.patch-0.json',
-  'notes.sweep-2.json', 'sub/keep.md',
+  '_/issue-trees/7.json', 'release.input-notes.json', 'sub/x.json.input-1.json', 'sub/_/issue-trees/7.json.input-0.json',
+  'release.patch-notes.json', 'sub/keep.md',
 ]
 const put = (root, rel) => {
   mkdirSync(dirname(join(root, rel)), { recursive: true })
@@ -136,12 +134,14 @@ for (const bash of BASHES) {
   })
 }
 
-test('パターンはホストが実際に作る一時ファイルの名前の形に合う（状態ファイルの場所・patch / sweep / Write の .md の名前）', () => {
+test('パターンはホストが実際に作る一時ファイルの名前の形に合う（状態ファイルの場所・state.sh の入力ファイル / Write の .md の名前）', () => {
   const src = readFileSync(join(HERE, '..', 'scripts', 'implement-issue-tree.src.js'), 'utf8')
-  // patch・sweep は作業ツリーのルートからの _/issue-trees/<parent>.json の隣（ルートにアンカーできる）
+  // state.sh の入力ファイルは作業ツリーのルートからの _/issue-trees/<parent>.json の隣（ルートにアンカーできる）
   assert.ok(src.includes('const STATE_FILE = `_/issue-trees/${parent}.json`'), 'STATE_FILE の場所')
-  assert.ok(src.includes('`${STATE_FILE}.patch-${nonce}.json`'), 'patch の名前')
-  assert.ok(src.includes('${STATE_FILE}.sweep-${nonce}.json'), 'sweep の名前')
+  assert.ok(src.includes('`${STATE_FILE}.input-${nonce}.json`'), '入力ファイルの名前')
+  assert.ok(readFileSync(join(HERE, '..', 'scripts', 'state.sh'), 'utf8').includes('in_src="${file}.input-${'), 'state.sh が読む名前')
+  // ほかの一時ファイルの名前（旧 patch・sweep）が戻っていないこと。戻ったらパターンを足す
+  assert.doesNotMatch(src, /\$\{STATE_FILE\}\.(patch|sweep)-/, '旧 patch・sweep の名前')
   // Write の .md はカレントディレクトリ（ルートの保証が無いのでアンカーしない）
   assert.ok(src.includes('const writtenFileOf = (nonce) => `.implement-issue-tree-${nonce}.md`'), '.md の名前')
   const script = readFileSync(SCRIPT, 'utf8')

@@ -67,8 +67,8 @@ pw_decode_command() {
 }
 
 # agent が Write ツールで書いたファイル（pw_written_path）を自分の一時ファイル $4 へ写し、写しの内容（末尾の改行を除く）
-# から計算した SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容) が期待値と一致するか確かめる（state-write.sh の verify_patch と
-# 同じ定義。ホストの statePatchSha256）。照合と読み込みは同じ写しに対して行う。$1 = nonce、$2 = 束縛先、$3 = 期待値。
+# から計算した SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容) が期待値と一致するか確かめる（state.sh の入力ファイルの照合と
+# 同じ形。ホストの writtenSha256）。照合と読み込みは同じ写しに対して行う。$1 = nonce、$2 = 束縛先、$3 = 期待値。
 # 一致すれば写しを「末尾の改行を除いた内容」に書き直して 0。無い・不一致は標準エラーに理由を出して非ゼロ。
 pw_verify_written() {
   local src actual content
@@ -110,7 +110,7 @@ pw_decode_branch() {
 # 取得の失敗・項目の欠落（null）・不一致は、標準エラーに理由を出して非ゼロ。
 pw_verify_pr_refs() {
   local got
-  got=$(gh pr view "$1" --json headRefName,baseRefName,isCrossRepository --jq '.headRefName, .baseRefName, .isCrossRepository') || {
+  got=$(pw_gh_pr view "$1" --json headRefName,baseRefName,isCrossRepository --jq '.headRefName, .baseRefName, .isCrossRepository') || {
     echo "FAILED: PR #$1 の head・base を取得できない" >&2
     return 1
   }
@@ -120,9 +120,31 @@ pw_verify_pr_refs() {
   fi
 }
 
+# 対象リポジトリ（owner/name）。空ならカレントディレクトリのリポジトリ。各スクリプトの先頭の --repo が入れる
+# （ホストの args.repo。gh の呼び出しを対象リポジトリへ束縛する）
+PW_REPO=''
+
+# owner/name の形（英数字・.・_・- の 2 要素。先頭は英数字・.. を含まない）。ホストの parseRepoArg を通った値を受け取る
+pw_valid_repo() {
+  case "$1" in
+    '' | *[!A-Za-z0-9._/-]* | [!A-Za-z0-9]* | */ | *//* | *..* | */*/*) return 1 ;;
+    */[A-Za-z0-9._-]*) return 0 ;;
+  esac
+  return 1
+}
+
+# gh pr <サブコマンド> ...。PW_REPO があれば -R で対象リポジトリを明示する
+pw_gh_pr() {
+  if [ -n "${PW_REPO}" ]; then
+    gh pr "$@" -R "${PW_REPO}"
+  else
+    gh pr "$@"
+  fi
+}
+
 # PR 本文を $2 へ書く（旧プロンプトの gh pr view <N> --json body --jq '.body // ""' > "$f" と同じ。本文の後ろに改行 1 つ）
 pw_fetch_body() {
-  gh pr view "$1" --json body --jq '.body // ""' >"$2"
+  pw_gh_pr view "$1" --json body --jq '.body // ""' >"$2"
 }
 
 # opt-in テスト実行記録の節を書き直す（旧プロンプトの optinRecordRewriteLines と同じ手順）。$1 = 本文のファイル、$2 = sha、

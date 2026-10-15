@@ -4,7 +4,7 @@
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる。カレントディレクトリの作業ツリーが対象）:
 #   bash worktree-exclude.sh
 #
-# 一時ファイル（.implement-issue-tree-<nonce>.md・<状態ファイル>.patch-<nonce>.json・<状態ファイル>.sweep-<nonce>.json）は
+# 一時ファイル（.implement-issue-tree-<nonce>.md・<状態ファイル>.input-<nonce>.json）は
 # 同梱スクリプトが読んで消すが、スクリプトを起動できなかった経路（hook の拒否・中断）では残る。git add の前に消す手順は
 # agent がプロンプトに従うことと、カレントディレクトリが作業ツリーのルートであることに依存し、サブディレクトリで
 # git add -A すると残ったファイルが stage される。除外設定に載せて、git add がどこから実行されても拾わないようにする
@@ -16,10 +16,9 @@
 # に効く。リポジトリにコミットされる .gitignore は変えない。
 #
 # 書いた行はランのあとも残り、利用者の全 worktree に効き続ける。そのため、実際に作られる名前の形だけに絞る:
-#   - /_/issue-trees/*.json.patch-*.json・/_/issue-trees/*.json.sweep-*.json: ホストの STATE_FILE は
-#     `_/issue-trees/${parent}.json`（作業ツリーのルートからの相対パス）で、patch・sweep はその後ろに .patch-<nonce>.json・
-#     .sweep-<nonce>.json を付けた名前（statePatchSteps・state-write.sh・worktree-cleanup.sh）。場所が決まっているので
-#     ルートにアンカーする（release.patch-notes.json のような利用者のファイルを巻き込まない）
+#   - /_/issue-trees/*.json.input-*.json: ホストの STATE_FILE は `_/issue-trees/${parent}.json`（作業ツリーのルートからの
+#     相対パス）で、state.sh の入力ファイルはその後ろに .input-<nonce>.json を付けた名前（ホストの inputFile・state.sh の
+#     in_src）。場所が決まっているのでルートにアンカーする（release.input-notes.json のような利用者のファイルを巻き込まない）
 #   - .implement-issue-tree-*.md: agent が「カレントディレクトリ」に書く（writtenFileOf・pw_written_path）。カレント
 #     ディレクトリが作業ツリーのルートである保証は無いので、アンカーしない（名前の接頭辞がこのスキル固有なので、
 #     利用者のファイルに当たることは実質ない）
@@ -51,9 +50,9 @@ fail() {
   exit 1
 }
 
-# パターンと、それに当たる見本の名前（同じ順）。ホストの writtenFileOf・statePatchSteps・sweep の名前の形と合わせる
-patterns=('.implement-issue-tree-*.md' '/_/issue-trees/*.json.patch-*.json' '/_/issue-trees/*.json.sweep-*.json')
-samples=('.implement-issue-tree-0.md' '_/issue-trees/1.json.patch-0.json' '_/issue-trees/1.json.sweep-0.json')
+# パターンと、それに当たる見本の名前（同じ順）。ホストの writtenFileOf・state.sh の入力ファイルの名前の形と合わせる
+patterns=('.implement-issue-tree-*.md' '/_/issue-trees/*.json.input-*.json')
+samples=('.implement-issue-tree-0.md' '_/issue-trees/1.json.input-0.json')
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "git の作業ツリーの外で実行された"
 top=$(git rev-parse --show-toplevel) || fail "作業ツリーのルートを求められない"
