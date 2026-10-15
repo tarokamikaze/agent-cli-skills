@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
-import { requestedNumbers, STUB_SKILL_DIR } from './lib/stub-run.mjs'
+import { requestedNumbers, STUB_SKILL_DIR, stateLoadOut } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
   dirname(fileURLToPath(import.meta.url)),
@@ -333,7 +333,7 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') {
-      return { ok: true, fileExisted: saved !== null, items: saved ?? {}, highWaterBytes: 0, highWaterVersion: saved ? 2 : 0 }
+      return stateLoadOut(prompt, saved)
     }
     if (label === 'state:load-verify') {
       if (saved === null) return { headerLines: 'NOFILE', hashes: {} }

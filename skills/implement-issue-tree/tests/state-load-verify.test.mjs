@@ -51,6 +51,9 @@ const SLICE_EXPORTS = [
   'checkPrBinding',
   'isValidStateVerifyResult',
   'parseStateVerifyHeader',
+  'parseStateLoadSummary',
+  'isValidStateLoadResult',
+  'HIGH_WATER_SCHEMA_VERSION',
   'applyPrereqTransitions',
   'normalizeBlockedReason',
   'MERGE_SCHEMA',
@@ -71,6 +74,9 @@ const {
   checkPrBinding,
   isValidStateVerifyResult,
   parseStateVerifyHeader,
+  parseStateLoadSummary,
+  isValidStateLoadResult,
+  HIGH_WATER_SCHEMA_VERSION,
   applyPrereqTransitions,
   normalizeBlockedReason,
   MERGE_SCHEMA,
@@ -247,7 +253,11 @@ function installAgentStub(behavior) {
   return { calls, logs }
 }
 
-const loadResult = (items, extra = {}) => ({ ok: true, fileExisted: true, items, highWaterBytes: 0, highWaterVersion: 0, ...extra })
+// 読込エージェントの返却（state-read.sh summary の行をそのまま写した summaryLine と items）。数値の分解はホストが行う。
+const loadResult = (items, { highWaterBytes = 0, highWaterVersion = 0, count = Object.keys(items ?? {}).length } = {}) =>
+  ({ summaryLine: `OK count=${count} bytes=${highWaterBytes} version=${highWaterVersion}`, createLine: '', items })
+// ファイルが無く、読込エージェントが state-write.sh create で新規作成した（create の出力は OK）。
+const CREATED_LOAD = { summaryLine: 'NOFILE', createLine: 'OK', items: {} }
 
 test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unverified として返す（throw しない）', async () => {
   const fabricated = Object.fromEntries(Object.entries(sampleItems).map(([k, v]) => [k, { ...v, pr: Number(k) + 1006 }]))
@@ -309,7 +319,7 @@ test('loadState: 読込側が既存と申告したファイルを検証側が見
 test('loadState: ファイルが無く新規作成した場合は検証が NOFILE でも状態なしで続行する', async () => {
   installAgentStub((opts) =>
     opts.label === 'state:load'
-      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      ? CREATED_LOAD
       : NOFILE_OUT)
   const r = await loadState()
   assert.deepEqual(r.items, {})
@@ -319,7 +329,7 @@ test('loadState: ファイルが無く新規作成した場合は検証が NOFIL
 test('loadState: 新規作成（items: {}）は検証成立で verified: true', async () => {
   installAgentStub((opts) =>
     opts.label === 'state:load'
-      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      ? CREATED_LOAD
       : verifyOut({}, { version: 2 }))
   const r = await loadState()
   assert.deepEqual(r.items, {})
@@ -450,6 +460,11 @@ test('検証プロンプトは項目ごとの jq -jcS ハッシュを要求し�
   assert.match(calls[0].prompt, /5 件ずつ/)
   assert.match(calls[0].prompt, /推測で埋めない/)
   assert.match(calls[0].prompt, /ホストが再取得/)
+  // summary・create の出力行は加工せずに summaryLine・createLine へ写させ、数値の分解をさせない（Issue #23 と同じ方式）
+  assert.match(calls[0].prompt, /出力の行を 1 文字も変えずにそのまま summaryLine へ写す/)
+  assert.match(calls[0].prompt, /標準出力をそのまま createLine へ写す/)
+  assert.match(calls[0].prompt, /count= の値を <件数> として/)
+  assert.doesNotMatch(calls[0].prompt, /highWaterBytes|highWaterVersion|fileExisted|ok: true|OK <件数>/)
 })
 
 test('mergeVerifyPrompt は headRefName・baseRefName・closingIssuesReferences を取得させる', () => {
@@ -827,7 +842,7 @@ test('parseStateVerifyHeader: ラベル違い・数値でない・余分な行�
 test('loadState: 新規作成した状態ファイル（items: {}・高水位 0・版 2）は、検証が state-verify.sh の行をそのまま返せば照合が成立する（Issue #23 の再現）', async () => {
   const { calls } = installAgentStub((opts) =>
     opts.label === 'state:load'
-      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      ? CREATED_LOAD
       : { headerLines: `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=2`, hashes: {} })
   const r = await loadState()
   assert.deepEqual(r.items, {})
@@ -849,7 +864,7 @@ test('loadState: 検証が返す行に空白・改行・順序の揺れがあっ
 })
 
 test('loadState: haiku が行を加工して返したら（旧形式・ラベル違い）sonnet で取り直し、sonnet も加工すれば停止する', async () => {
-  const loaded = { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+  const loaded = CREATED_LOAD
   const good = { headerLines: `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=2`, hashes: {} }
   for (const tampered of [`KEYS ${EMPTY_KEYS} 0\n[0,2]`, `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=two`, `${good.headerLines}\nextra`]) {
     const { calls } = installAgentStub((opts) => {
@@ -867,8 +882,130 @@ test('loadState: haiku が行を加工して返したら（旧形式・ラベル
 test('loadState: 高水位の行が読込側と食い違えば（version 0 など）従来どおり停止する（fail-closed は変えない）', async () => {
   installAgentStub((opts) =>
     opts.label === 'state:load'
-      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      ? CREATED_LOAD
       : { headerLines: `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=0`, hashes: {} })
+  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
+})
+
+// state-read.sh summary の行（と NOFILE のときの state-write.sh create の出力）の分解。読込エージェントにも
+// 位置で数値を分解させず、行を加工せずに返させてホストが分解する（Issue #23 と同じ取り違えを防ぐ）。
+test('parseStateLoadSummary: 新規ツリー（NOFILE → create が OK）・既存ファイル・PARSE_ERROR・create 失敗・dryRun を分解する', () => {
+  const base = { count: 0, highWaterBytes: 0, highWaterVersion: 0 }
+  assert.deepEqual(parseStateLoadSummary('NOFILE', 'OK', false), { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION })
+  assert.deepEqual(parseStateLoadSummary('OK count=0 bytes=0 version=2', '', false), { ...base, ok: true, fileExisted: true, highWaterVersion: 2 })
+  assert.deepEqual(parseStateLoadSummary('OK count=12 bytes=4096 version=2', '', false), { ok: true, fileExisted: true, count: 12, highWaterBytes: 4096, highWaterVersion: 2 })
+  assert.deepEqual(parseStateLoadSummary('PARSE_ERROR', '', false), { ...base, ok: false, fileExisted: true })
+  // create が OK 以外（失敗で何も出ない・FAILED を写した）は初期化失敗（ok: false）
+  for (const c of ['', 'FAILED: exists', 'ok']) {
+    assert.deepEqual(parseStateLoadSummary('NOFILE', c, false), { ...base, ok: false, fileExisted: false }, JSON.stringify(c))
+  }
+  // dryRun（読み取り専用）は作らない。create の出力があれば形が合わない
+  assert.deepEqual(parseStateLoadSummary('NOFILE', '', true), { ...base, ok: true, fileExisted: false })
+  assert.equal(parseStateLoadSummary('NOFILE', 'OK', true), null)
+})
+
+test('parseStateLoadSummary: 前後の空白・改行（CRLF・空行）の揺れは同じ値に分解する', () => {
+  const want = { ok: true, fileExisted: true, count: 3, highWaterBytes: 4096, highWaterVersion: 2 }
+  for (const s of [
+    'OK count=3 bytes=4096 version=2\n',
+    '  OK count=3 bytes=4096 version=2\t',
+    '\r\n\nOK count=3 bytes=4096 version=2\r\n',
+    'OK  count=3\tbytes=4096   version=2',
+  ]) {
+    assert.deepEqual(parseStateLoadSummary(s, ' \n', false), want, JSON.stringify(s))
+  }
+  assert.equal(parseStateLoadSummary('\n NOFILE \r\n', '\nOK\r\n', false).highWaterVersion, HIGH_WATER_SCHEMA_VERSION)
+})
+
+test('parseStateLoadSummary: ラベル違い・数値でない・余分な行・欠けた行は分解せず null（形が合わない）', () => {
+  for (const [s, c] of [
+    [undefined, ''], [null, ''], ['', ''], ['  \n', ''], ['OK count=3 bytes=4096 version=2', undefined], ['OK count=3 bytes=4096 version=2', 3],
+    // 旧形式・ラベル違い・順序違い
+    ['OK 3 4096 2', ''],
+    ['OK count=3 version=2 bytes=4096', ''],
+    ['ok count=3 bytes=4096 version=2', ''],
+    ['OK cnt=3 bytes=4096 version=2', ''],
+    ['OK count:3 bytes:4096 version:2', ''],
+    ['NOFILES', 'OK'],
+    ['PARSE ERROR', ''],
+    // 数値でない・負・小数・先頭のゼロ・桁あふれ・欠落
+    ['OK count=x bytes=4096 version=2', ''],
+    ['OK count=3 bytes=-1 version=2', ''],
+    ['OK count=3 bytes=4096 version=2.0', ''],
+    ['OK count=03 bytes=4096 version=2', ''],
+    ['OK count=3 bytes=4096 version=', ''],
+    [`OK count=3 bytes=${'9'.repeat(16)} version=2`, ''],
+    ['OK count=3 bytes=4096', ''],
+    ['OK count=3 bytes=4096 version=2 extra', ''],
+    // 余分な行
+    ['OK count=3 bytes=4096 version=2\nOK count=3 bytes=4096 version=2', ''],
+    ['OK count=3 bytes=4096 version=2\nNOFILE', ''],
+    ['NOFILE\nOK', 'OK'],
+    ['NOFILE', 'OK\nOK'],
+    // ファイルがあるのに create の出力がある（読込エージェントが既存ファイルで create を走らせた・別の出力を写した）
+    ['OK count=3 bytes=4096 version=2', 'OK'],
+    ['PARSE_ERROR', 'OK'],
+  ]) {
+    assert.equal(parseStateLoadSummary(s, c, false), null, JSON.stringify([s, c]))
+  }
+})
+
+test('isValidStateLoadResult: summaryLine・createLine の形と items の型を検証する', () => {
+  assert.equal(isValidStateLoadResult(loadResult(sampleItems), false), true)
+  assert.equal(isValidStateLoadResult(CREATED_LOAD, false), true)
+  assert.equal(isValidStateLoadResult({ summaryLine: 'NOFILE', createLine: '', items: {} }, true), true)
+  for (const bad of [
+    null,
+    // 旧形式の返却（エージェントが数値を分解して返す形）は受理しない
+    { ok: true, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 2 },
+    { ...loadResult(sampleItems), items: null },
+    { ...loadResult(sampleItems), items: [] },
+    { ...loadResult(sampleItems), summaryLine: 'OK 4 0 0' },
+    { ...loadResult(sampleItems), createLine: undefined },
+  ]) {
+    assert.equal(isValidStateLoadResult(bad, false), false, JSON.stringify(bad))
+  }
+  assert.equal(isValidStateLoadResult(CREATED_LOAD, true), false)
+})
+
+test('loadState: 新規ツリーで読込が summary・create の行をそのまま返せば、版 2 として照合が成立する（Issue #23 と同じ症状の再現）', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load' ? { summaryLine: 'NOFILE', createLine: 'OK\n', items: {} } : verifyOut({}, { version: 2 }))
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.equal(r.highWaterVersion, 2)
+})
+
+test('loadState: 既存ファイルの summary の行に空白・改行の揺れがあっても照合が成立する', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? { summaryLine: '\r\n OK count=4 bytes=4096 version=2 \r\n', createLine: '', items: sampleItems }
+      : verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 }))
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.equal(r.highWaterBytes, 4096)
+  assert.equal(r.highWaterVersion, 2)
+})
+
+test('loadState: 読込の haiku が summary の行を加工したら sonnet で取り直し、sonnet も加工すれば停止する', async () => {
+  const good = loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
+  for (const tampered of ['OK 4 4096 2', 'OK count=4 bytes=4096 version=two', `${good.summaryLine}\nextra`]) {
+    const { calls } = installAgentStub((opts) => {
+      if (opts.label.startsWith('state:load-verify')) return verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 })
+      return opts.model === 'haiku' ? { ...good, summaryLine: tampered } : good
+    })
+    const r = await loadState()
+    assert.equal(r.highWaterVersion, 2, tampered)
+    assert.deepEqual(calls.slice(0, 2).map((c) => c.opts.label), ['state:load', 'state:load:fallback-sonnet'])
+    installAgentStub((opts) =>
+      opts.label.startsWith('state:load-verify') ? verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 }) : { ...good, summaryLine: tampered })
+    await assert.rejects(() => loadState(), /再実行/, tampered)
+  }
+})
+
+test('loadState: summary の版が検証側と食い違えば（読込側の 0 など）従来どおり停止する', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load' ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 0 }) : verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 

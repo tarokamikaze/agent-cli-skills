@@ -39,11 +39,11 @@ const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-high-water-def
 const slicePath = join(sliceDir, 'implement-issue-tree-high-water-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
-const SLICE_EXPORTS = ['computeNextHighWater', 'STATE_LOAD_SCHEMA', 'HIGH_WATER_SCHEMA_VERSION']
+const SLICE_EXPORTS = ['computeNextHighWater', 'STATE_LOAD_SCHEMA', 'HIGH_WATER_SCHEMA_VERSION', 'parseStateLoadSummary']
 writeFileSync(slicePath, `${definitionPart}\nexport { ${SLICE_EXPORTS.join(', ')} }\n`)
 
 const mod = await import(pathToFileURL(slicePath).href)
-const { computeNextHighWater, STATE_LOAD_SCHEMA, HIGH_WATER_SCHEMA_VERSION } = mod
+const { computeNextHighWater, STATE_LOAD_SCHEMA, HIGH_WATER_SCHEMA_VERSION, parseStateLoadSummary } = mod
 
 // --- 1. 純粋関数（computeNextHighWater）の境界値テスト ---
 
@@ -83,12 +83,22 @@ test('computeNextHighWater: 現在値が非整数・負数（壊れた状態フ�
 
 // --- STATE_LOAD_SCHEMA の契約 ---
 
-test('STATE_LOAD_SCHEMA: required に highWaterBytes が含まれる', () => {
-  assert.ok(STATE_LOAD_SCHEMA.required.includes('highWaterBytes'))
+// 高水位（Issue #471）と版（Issue #496）は、エージェントが加工せずに返す summaryLine
+// （OK count=<n> bytes=<高水位> version=<版>）からホストが分解する（Issue #23 と同じ方式）。
+test('STATE_LOAD_SCHEMA: required に summaryLine・createLine・items が含まれ、数値の高水位をエージェントに返させない', () => {
+  for (const k of ['summaryLine', 'createLine', 'items']) assert.ok(STATE_LOAD_SCHEMA.required.includes(k), k)
+  assert.ok(!STATE_LOAD_SCHEMA.required.includes('highWaterBytes'))
+  assert.ok(!STATE_LOAD_SCHEMA.required.includes('highWaterVersion'))
 })
 
-test('STATE_LOAD_SCHEMA: required に highWaterVersion が含まれる（Issue #496）', () => {
-  assert.ok(STATE_LOAD_SCHEMA.required.includes('highWaterVersion'))
+test('parseStateLoadSummary: summaryLine の bytes・version を高水位・版に分解する（Issue #471 / #496）', () => {
+  assert.deepEqual(parseStateLoadSummary('OK count=3 bytes=5489787 version=2', '', false), {
+    ok: true, fileExisted: true, count: 3, highWaterBytes: 5489787, highWaterVersion: 2,
+  })
+  // 新規作成は版 HIGH_WATER_SCHEMA_VERSION・高水位 0
+  assert.deepEqual(parseStateLoadSummary('NOFILE', 'OK', false), {
+    ok: true, fileExisted: false, count: 0, highWaterBytes: 0, highWaterVersion: HIGH_WATER_SCHEMA_VERSION,
+  })
 })
 
 test('HIGH_WATER_SCHEMA_VERSION: 現行値は 2（Issue #496。旧版=1 未満・番兵値 0 と区別する）', () => {

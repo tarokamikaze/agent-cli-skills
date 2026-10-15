@@ -2833,32 +2833,24 @@ description:'対象 branch が origin/<base> より先行している commit 数
 }
 
 
+
+
 const STATE_LOAD_SCHEMA={
 type:'object',
-required:['ok','fileExisted','items','highWaterBytes','highWaterVersion'],
+required:['summaryLine','createLine','items'],
 properties:{
-ok:{type:'boolean',description:'読み込み・パース成功なら true。ファイルなしの初期化成功も true。jq パース失敗等は false'},
-fileExisted:{type:'boolean',description:'ファイルが存在した場合 true（新規作成した場合は false）'},
+summaryLine:{
+type:'string',
+description:'state-read.sh summary の出力行をそのまま（NOFILE / PARSE_ERROR / OK count=<n> bytes=<n> version=<n>）',
+},
+createLine:{
+type:'string',
+description:'NOFILE で state-write.sh create を実行した場合はその標準出力をそのまま。実行しなかった場合は空文字',
+},
 items:{
 type:'object',
 description:'issue 番号（文字列キー）→ 状態オブジェクトのマップ。空オブジェクトも可',
 additionalProperties:true,
-},
-highWaterBytes:{
-type:'integer',
-minimum:0,
-description:
-'状態ファイルのトップレベル .perWorktreeByteReserveHighWater の値（バイト単位）。'+
-'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #471）。',
-},
-highWaterVersion:{
-type:'integer',
-minimum:0,
-description:
-'状態ファイルのトップレベル .perWorktreeByteReserveHighWaterVersion の値。'+
-'フィールドが存在しない場合・ファイル新規作成の場合は 0（Issue #496。0 は'+
-'ネスト二重計上を含み得た旧形式を示す番兵値で、現行版 HIGH_WATER_SCHEMA_VERSION と'+
-'一致しない限り高水位は無効として扱われる）。',
 },
 },
 additionalProperties:true,
@@ -3037,17 +3029,38 @@ return{result:null,outputMissing:true,attempts}
 
 
 
-function isValidStateLoadResult(r){
+
+
+
+
+function parseStateLoadSummary(summaryLine,createLine,readOnly){
+const lines=(t)=>(typeof t==='string'?t.split('\n').map((l)=>l.trim()).filter(Boolean):null)
+const s=lines(summaryLine)
+const c=lines(createLine)
+if(!s|| !c||s.length!==1)return null
+const base={ok:false,fileExisted:true,count:0,highWaterBytes:0,highWaterVersion:0}
+if(s[0]==='NOFILE'){
+if(readOnly)return c.length?null:{ ...base,ok:true,fileExisted:false}
+if(c.length>1)return null
+const created=c[0]==='OK'
+return{ ...base,ok:created,fileExisted:false,highWaterVersion:created?HIGH_WATER_SCHEMA_VERSION:0}
+}
+if(c.length)return null
+if(s[0]==='PARSE_ERROR')return base
+const n='(0|[1-9]\\d{0,14})'
+const m=new RegExp(`^OK[ \\t]+count=${n}[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(s[0])
+return m?{ ...base,ok:true,count:Number(m[1]),highWaterBytes:Number(m[2]),highWaterVersion:Number(m[3])}:null
+}
+
+
+
+
+function isValidStateLoadResult(r,readOnly){
 return(
-typeof r?.ok==='boolean'&&
-typeof r?.fileExisted==='boolean'&&
 r?.items!==null&&
 typeof r?.items==='object'&&
 !Array.isArray(r.items)&&
-Number.isInteger(r?.highWaterBytes)&&
-r.highWaterBytes>=0&&
-Number.isInteger(r?.highWaterVersion)&&
-r.highWaterVersion>=0
+parseStateLoadSummary(r.summaryLine,r.createLine,readOnly)!==null
 )
 }
 
@@ -3221,30 +3234,29 @@ async function loadState(){
 
 
 const readOnly=dryRunEnabled
-const{result,outputMissing}=await runStateAgent(
+
+
+const{result:loadRaw,outputMissing}=await runStateAgent(
 [
 `状態ファイル読み込みタスク。`,
 TEMP_FILE_POLICY,
 STATE_SCRIPT_ONLY,
 `【手順】`,
-`1. 次を実行する: ${scriptCommand('state-read.sh', ` summary ${STATE_FILE}`)}`,
-`2. 出力が「OK <件数> <高水位> <版>」の場合: ok: true, fileExisted: true, highWaterBytes: <高水位>, highWaterVersion: <版>。`+
-`items は 5 件ずつ分けて読む: 次のコマンドの <開始> に 1, 6, 11, …（<件数> まで）、<終了> に <開始>+4 を入れて実行し、`+
+`1. 次を実行し、出力の行を 1 文字も変えずにそのまま summaryLine へ写す（数値を取り出したり、書き換えたりしない。分解はホストが行う）: ${scriptCommand('state-read.sh', ` summary ${STATE_FILE}`)}`,
+`2. 出力が OK で始まる場合: createLine は ""。`+
+`items は 5 件ずつ分けて読む: 出力の count= の値を <件数> として、次のコマンドの <開始> に 1, 6, 11, …（<件数> まで）、<終了> に <開始>+4 を入れて実行し、`+
 `出力の JSON オブジェクトを合わせて items として返す: ${scriptCommand('state-read.sh', ` range ${STATE_FILE}`)} <開始> <終了>`+
 `。読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。`,
-`3. 出力が PARSE_ERROR の場合: ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`,
+`3. 出力が PARSE_ERROR の場合: createLine: ""・items: {} を返す。`,
 readOnly
-?`4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。`+
-`ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
-:`4. 出力が NOFILE の場合: 次を実行して初期ファイルを作る: `+
-`${scriptCommand('state-write.sh', ` create ${STATE_FILE} ${parent} ${baseBranch} ${concurrency} ${HIGH_WATER_SCHEMA_VERSION}`)}`+
-`。OK と出て終了コード 0 なら ok: true, fileExisted: false, items: {}, highWaterBytes: 0,`+
-` highWaterVersion: ${HIGH_WATER_SCHEMA_VERSION}。それ以外は ok: false, fileExisted: false, items: {},`+
-` highWaterBytes: 0, highWaterVersion: 0 を返す。`,
-`返却: ok, fileExisted（boolean）, items（JSON オブジェクト）, highWaterBytes・highWaterVersion（整数。欠落は 0）。`,
+?`4. 出力が NOFILE の場合: 読み取り専用のためディレクトリもファイルも作らない。createLine: ""・items: {} を返す。`
+:`4. 出力が NOFILE の場合: 次を実行して初期ファイルを作り、その標準出力をそのまま createLine へ写す（何も出なければ ""）。items: {} を返す: `+
+`${scriptCommand('state-write.sh', ` create ${STATE_FILE} ${parent} ${baseBranch} ${concurrency} ${HIGH_WATER_SCHEMA_VERSION}`)}`,
+`返却: summaryLine（文字列）, createLine（文字列）, items（JSON オブジェクト）。`,
 ].join('\n'),
-{label:'state:load',schema:STATE_LOAD_SCHEMA,isValid:isValidStateLoadResult},
+{label:'state:load',schema:STATE_LOAD_SCHEMA,isValid:(r)=>isValidStateLoadResult(r,readOnly)},
 )
+const result=loadRaw&&{ ...parseStateLoadSummary(loadRaw.summaryLine,loadRaw.createLine,readOnly),items:loadRaw.items}
 
 
 
@@ -3253,7 +3265,7 @@ readOnly
 if(outputMissing){
 throw new Error(
 `状態ファイル（${STATE_FILE}）読み込みエージェントが haiku / sonnet いずれも`+
-`StructuredOutput を返さなかった。ファイル自体の破損ではないため、そのまま再実行すること。`,
+`StructuredOutput を返さなかった（または返した行の形が合わなかった）。ファイル自体の破損ではないため、そのまま再実行すること。`,
 )
 }
 if(!result?.ok){
@@ -3813,7 +3825,7 @@ const SCRIPT_SHA256={
 'measure-residual-bytes.sh':'27c6c6762f1e702f2bf3111a7c951989b1dba99c5703767bcbb21a295a6da99d',
 'measure-free-disk.sh':'591ad8f42964637a2887bf0680437745e9685e40b49dbc7d8319d5b98045d293',
 'state-verify.sh':'b4f0158663318342de6e0336475a47e58b887e3ab96df2b6d78ecbf945929a4e',
-'state-read.sh':'b9a4f5c2d31a244b074a5e65c562e28dfadc7cba81b4bdff06045c3aa6087498',
+'state-read.sh':'7238b17aa5c2b72f7403e14b7c521ffa4b7231f375e435d7d684ec7bbaef8104',
 'state-write.sh':'da2a68c6b71e14cd4b405098d7459129951a38bd9456adbfb675fb075b87b6d9',
 'fetch-tree.sh':'e08d9f328e39de838b4bb7aa0fdbf4826f185eaba0a21ccf89133f0850351097',
 'fetch-root-ancestors.sh':'2308c4355f2ba30620a3e929e265e095e958c0003e83d8f342ffa411899ee1ba',

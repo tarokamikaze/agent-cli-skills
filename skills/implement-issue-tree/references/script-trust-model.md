@@ -70,7 +70,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 | スクリプト | 置き換えた手順 | 出力 |
 |------------|----------------|------|
 | `state-verify.sh` | `state:load-verify` の 1 行のシェル | 高水位の行（`HIGHWATER bytes=<高水位> version=<版>`）を除いて旧コマンドとバイト単位で同じ（`KEYS` 行・`<キー> <sha256>` 行・`NOFILE`。行範囲の分割実行も同じ）。エージェントは `KEYS` 行と `HIGHWATER` 行を加工せず `headerLines` で返し、数値の分解はホストが行う |
-| `state-read.sh` | `state:load` の読み込み・`state:load-fill` の jq | `summary`（`NOFILE` / `PARSE_ERROR` / `OK <件数> <高水位> <版>`）・`range`・`keys`（旧 jq と同じ値） |
+| `state-read.sh` | `state:load` の読み込み・`state:load-fill` の jq | `summary`（`NOFILE` / `PARSE_ERROR` / `OK count=<件数> bytes=<高水位> version=<版>`）・`range`・`keys`（旧 jq と同じ値）。エージェントは `summary` の行（と `NOFILE` のときの `state-write.sh create` の出力）を加工せず `summaryLine`・`createLine` で返し、分解はホストが行う |
 | `state-write.sh` | 状態ファイルの全書き込み（初期作成・項目マージ・blocked の一括マージ・worktree のクリア・pending の一括初期化・高水位の更新 2 種） | 成功は `OK`、失敗は標準エラーの `FAILED: <理由>` と exit 1。jq の式・一時ファイル + `mv` の置き換え・`.updatedAt` の更新は旧手順と同じ |
 | `fetch-tree.sh` | Tree フェーズのツリー取得と opt-in マーカー抽出 | `NODE` 行・`OPTIN` 行・`DONE <件数>`。件数が `total` と合わなければ取り直し、なお合わなければ `MISMATCH` と exit 1 |
 | `probe-declared-deps.sh` / `probe-prereqs.sh` | 依存宣言・ツリー外前提の `for` ループ | 旧コマンドと同じ 1 行の JSON（`sig` 付き）と `FAILED #<番号>`。レート制限の判定もスクリプトが行い、確認できたときだけ `RATE_LIMIT` 行を出す |
@@ -91,6 +91,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 旧出力と違う点（互換性の注記）:
 
 - `state-verify.sh` の 2 行目（高水位）は旧コマンドの `[<高水位>,<版>]` ではなく `HIGHWATER bytes=<高水位> version=<版>` を出す。旧手順はエージェントに「2 行目を highWaterBytes・highWaterVersion へ」と位置で数値を分解させており、小さいモデルが新規の状態ファイルの `[0,2]` を 0・0 と転記して照合不成立で止まった（Issue #23）。今はエージェントが `KEYS` 行とこの行を加工せずに `headerLines` で返し、ホストの `parseStateVerifyHeader` が分解する。各行の前後の空白・改行・2 行の順序の揺れは許し、ラベル違い・数値でない値・余分な行・欠けた行は照合不成立（fail-closed）にする
+- `state-read.sh summary` も同じ理由で、旧形式の `OK <件数> <高水位> <版>` ではなく `OK count=<件数> bytes=<高水位> version=<版>` を出す。`state:load` のエージェントはこの行と、`NOFILE` のときに実行した `state-write.sh create` の標準出力を加工せずに `summaryLine`・`createLine` で返し、成否・ファイルの有無・高水位・版はホストの `parseStateLoadSummary` が分解する。前後の空白・改行の揺れは許し、ラベル違い・数値でない値・余分な行・ファイルがあるのに `createLine` がある応答・読み取り専用（`dryRun`）で作成した応答は形が合わないとして sonnet で取り直し、それでも合わなければ停止する
 
 - `fetch-tree.sh` の `NODE` 行のタイトルは jq の `@tsv` でエスケープされる（タブ・改行・CR・`\` が `\t`・`\n`・`\r`・`\\` になる）。旧手順は agent が API の値をそのまま写していたため、これらの文字を含むタイトルは `nodes[].title` の文字列が旧と異なりうる。タイトルはログの表示と、agent への説明（非信頼データとして囲んで渡す）にだけ使い、ホストの照合・依存・実行順・ブランチ名には使わないため、判定は変わらない（タブ・改行を含むタイトルは agent への説明でエスケープ表記のまま見える）
 - `probe-declared-deps.sh` のレート制限は旧手順の判定どおりで、`resetAt`・`waitSeconds` は core が枯渇したときだけ返す（それ以外は `-`。ホストが固定の短い待機をする）

@@ -18,7 +18,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { signedReply } from './lib/signed-output.mjs'
-import { requestedNumbers, STUB_SKILL_DIR } from './lib/stub-run.mjs'
+import { requestedNumbers, STUB_SKILL_DIR, stateLoadOut } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
@@ -173,7 +173,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
-    if (label === 'state:load') return { ok: true, fileExisted: saved !== null, items: saved ?? {}, highWaterBytes: 0, highWaterVersion: saved ? 2 : 0 }
+    if (label === 'state:load') return stateLoadOut(prompt, saved)
     if (label === 'state:load-verify') return saved === null ? { headerLines: 'NOFILE', hashes: {} } : stateVerifyFor(saved, 2)
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }

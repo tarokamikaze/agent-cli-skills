@@ -54,6 +54,15 @@ export const STUB_SKILL_DIR = '/opt/skills/implement-issue-tree'
 export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
 
 /**
+ * state:load の返却（state-read.sh summary と state-write.sh create の出力行をそのまま写す形。分解はホストが行う）。
+ * saved が null なら状態ファイルが無い: 通常は create を実行して OK、dryRun の読み取り専用プロンプトでは作らない。
+ */
+export function stateLoadOut(prompt, saved = null, version = 2) {
+  if (saved === null) return { summaryLine: 'NOFILE', createLine: /読み取り専用のため/.test(prompt) ? '' : 'OK', items: {} }
+  return { summaryLine: `OK count=${Object.keys(saved).length} bytes=0 version=${version}`, createLine: '', items: saved }
+}
+
+/**
  * 依存宣言・ツリー外前提の取得プロンプト（probe-declared-deps.sh / probe-prereqs.sh を起動する 1 コマンド）から、
  * ホストが依頼した番号の並びを取り出す。コマンドが無ければ null。
  */
@@ -78,7 +87,7 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
-    if (label === 'state:load') return { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 }
+    if (label === 'state:load') return stateLoadOut(prompt)
     if (label === 'state:load-verify') return { headerLines: 'NOFILE', hashes: {} }
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
