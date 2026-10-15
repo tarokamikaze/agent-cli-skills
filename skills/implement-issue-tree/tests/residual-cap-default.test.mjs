@@ -11,6 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -30,7 +31,7 @@ if (markerIndex < 0) {
   throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
 }
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-residual-cap-defs-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-residual-cap-defs-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-residual-cap-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
@@ -549,9 +550,9 @@ test('測定スクリプトは du の終了コードを if の条件式で個別
   // du | cut のパイプ直結は終了状態が cut のものになる fail-open（PR #390 codex-review P1）。
   // また `duout=$(du ...); durc=$?` の素の代入は errexit 下で失敗時に即終了し err 計上へ到達
   // しないため、終了状態は if の条件式で検査する（PR #390 codex-review P1 第 3 ラウンド）
-  assert.match(residualScript, /if duout=\$\(du -sk -- "\$\{p\}" 2>\/dev\/null\); then/)
+  assert.match(residualScript, /if duout=\$\(du -sk -- "\$\{real\}" 2>\/dev\/null\); then/)
   assert.match(residualScript, /else\n\s*err=\$\(\(err \+ 1\)\)\n\s*fi/)
-  assert.doesNotMatch(residualScript, /du -sk -- "\$\{p\}" 2>\/dev\/null \| cut/)
+  assert.doesNotMatch(residualScript, /du -sk -- "\$\{(?:p|real)\}" 2>\/dev\/null \| cut/)
   assert.doesNotMatch(residualScript, /durc=\$\?/)
   // 旧実装は jq を while ループへ直結すると jq の非 0 終了が「入力 0 件の正常測定」に化けた
   // （PR #390 codex-review P1）。パス一覧は標準入力の行として直接読み、jq の展開自体を持たない。
@@ -565,7 +566,7 @@ test('ORPHAN_BYTES_SCHEMA は err・missing・count を必須フィールドと�
   // （欠落を 0 とみなすと分母に存在しないパスが残り予約が過小になる。Bugbot Medium 指摘）。
   // count は Issue #497 で追加した件数照合フィールド（一時ファイルの取り違え・空展開による
   // 0 件正常終了への fail-open を塞ぐ）。
-  assert.match(source, /required: \['kib', 'err', 'missing', 'count', 'inputSha256'\]/)
+  assert.match(source, /required: \['kib', 'err', 'missing', 'dup', 'count', 'inputSha256'\]/)
 })
 
 test('バイト軸は新規着手直前に台帳増分によらず実測し直す（PR #390 P1 第 4 ラウンド）', () => {
