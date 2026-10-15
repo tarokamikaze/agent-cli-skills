@@ -2,9 +2,11 @@
 # pr-body-edit.sh — PR 本文を取得し、決まった補正だけを加えて gh pr edit で書き戻し、反映を確かめるスクリプト
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる。カレントディレクトリのリポジトリが対象）:
-#   bash pr-body-edit.sh ensure     <PR> <issue> [--oos <nonce> <sha256>] [--optin <sha> <結果> <コマンド>...]
-#   bash pr-body-edit.sh optin      <PR> <sha> <結果> <コマンド>...
-#   bash pr-body-edit.sh oos-append <PR> <nonce> <threadId>...
+#   bash pr-body-edit.sh [--repo <owner/name>] ensure     <PR> <issue> [--milestone-warning] [--oos <nonce> <sha256>] [--optin <sha> <結果> <コマンド>...]
+#   bash pr-body-edit.sh [--repo <owner/name>] optin      <PR> <sha> <結果> <コマンド>...
+#   bash pr-body-edit.sh [--repo <owner/name>] oos-append <PR> <nonce> <threadId>...
+#   --repo はホストの args.repo（gh の呼び出しを対象リポジトリへ束縛する。無ければカレントディレクトリのリポジトリ）。
+#   --milestone-warning は PR 作成で pr-push.sh --mode pr の結果の milestone が unassigned のとき（警告の行を無ければ末尾へ足す）。
 #
 # 旧プロンプトは agent に f=$(mktemp)・gh pr view・grep と echo の連結・grep -avE と mv の連結・HEREDOC・gh pr edit を
 # 組み立てさせていた（PR 作成の手順 1c・fix の手順 4b と 6）。利用側の hook が拒否しうる形（;・&& の 3 本以上の連結）を
@@ -48,12 +50,14 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 . "${script_dir}/lib/pr-write.sh" || exit 2
 
 OOS_HEADING='## 対象外（out-of-scope）'
+# milestone の警告の行の先頭（pr-push.sh --mode pr が新規作成の本文へ足すものと同じ文言）
+MILESTONE_WARNING_PREFIX='> **警告**: Closes 対象の '
 # GitHub の closing keyword（close・closes・closed・fix・fixes・fixed・resolve・resolves・resolved）の後に、任意のコロンと
 # 空白を挟んで Issue の参照（#N・owner/repo#N・https://github.com/owner/repo/issues/N）が続く形。grep -iE で使う
 CLOSING_KEYWORD_RE='(^|[^a-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+(([a-z0-9_.-]+/[a-z0-9_.-]+)?#[0-9]+|https?://github[.]com/[^/[:space:]]+/[^/[:space:]]+/(issues|pull)/[0-9]+)'
 
 usage() {
-  echo "使い方: pr-body-edit.sh {ensure|optin|oos-append} PR番号 引数..." >&2
+  echo "使い方: pr-body-edit.sh [--repo owner/name] {ensure|optin|oos-append} PR番号 引数..." >&2
   exit 2
 }
 
@@ -62,14 +66,21 @@ fail() {
   exit 1
 }
 
-work_dir=''
 written=''
+# 一時ファイルは 1 つずつ作って 1 つずつ消す（再帰削除を持たない。scripts/ の静的ガードが rm -r を禁じる）
+tmp_files=()
 cleanup() {
-  [ -n "${work_dir}" ] && rm -rf -- "${work_dir}"
+  local t
+  for t in ${tmp_files[@]+"${tmp_files[@]}"}; do rm -f -- "${t}"; done
   [ -n "${written}" ] && rm -f -- "${written}"
   return 0
 }
 trap cleanup EXIT
+# 一時ファイルを作り、後始末に登録してパスを TMPF に入れる
+new_tmp() {
+  TMPF=$(mktemp) || fail "一時ファイルを作れない"
+  tmp_files+=("${TMPF}")
+}
 
 # Write ツールで書くファイルを、nonce の形式を確かめたあとで後始末に登録する（引数の誤りでも残さない）
 arm_written() {
@@ -77,6 +88,11 @@ arm_written() {
   written=$(pw_written_path "$1")
 }
 
+if [ $# -ge 2 ] && [ "$1" = --repo ]; then
+  pw_valid_repo "$2" || usage
+  PW_REPO=$2
+  shift 2
+fi
 [ $# -ge 2 ] || usage
 sub=$1
 pr=$2
@@ -84,6 +100,7 @@ shift 2
 pw_valid_pos_int "${pr}" || usage
 
 issue=''
+milestone_warning=0
 oos_nonce=''
 oos_sha=''
 optin_sha=''
@@ -112,6 +129,10 @@ case "${sub}" in
     issue=$1
     shift
     pw_valid_pos_int "${issue}" || usage
+    if [ $# -ge 1 ] && [ "$1" = --milestone-warning ]; then
+      milestone_warning=1
+      shift
+    fi
     if [ $# -ge 1 ] && [ "$1" = --oos ]; then
       [ $# -ge 3 ] || usage
       arm_written "$2"
@@ -148,10 +169,20 @@ case "${sub}" in
   *) usage ;;
 esac
 
-work_dir=$(mktemp -d) || fail "一時ディレクトリを作れない"
-orig="${work_dir}/orig"
-body="${work_dir}/body"
-section="${work_dir}/section"
+new_tmp
+orig=${TMPF}
+new_tmp
+body=${TMPF}
+new_tmp
+section=${TMPF}
+new_tmp
+add=${TMPF}
+new_tmp
+newlines=${TMPF}
+new_tmp
+merged=${TMPF}
+new_tmp
+after=${TMPF}
 
 # 照合は本文の取得より前に行う（写し間違いなら PR に触れずに止める）
 if [ -n "${oos_nonce}" ] && [ "${sub}" = ensure ]; then
@@ -163,7 +194,7 @@ if [ "${sub}" = oos-append ]; then
   cp -- "${written}" "${section}" || fail "Write ツールで書いたファイルを読めない"
   # 行の形と threadId を確かめる。空行は捨てる。CR は除く
   lines=0
-  : >"${work_dir}/add"
+  : >"${add}"
   while IFS= read -r l || [ -n "${l}" ]; do
     l=${l%$'\r'}
     [ -z "${l}" ] && continue
@@ -187,7 +218,7 @@ if [ "${sub}" = oos-append ]; then
     if printf '%s\n' "${l}" | grep -qiE "${CLOSING_KEYWORD_RE}"; then
       fail "対象外の行に Issue を閉じる記法（close / fix / resolve の後の #番号・owner/repo#番号・Issue の URL）がある"
     fi
-    printf '%s\n' "${l}" >>"${work_dir}/add"
+    printf '%s\n' "${l}" >>"${add}"
   done <"${section}"
   [ "${lines}" -ge 1 ] || fail "対象外の行が 1 行も無い"
 fi
@@ -214,25 +245,33 @@ case "${sub}" in
     if [ -n "${optin_sha}" ]; then
       pw_optin_rewrite "${body}" "${optin_sha}" "${optin_results}" "${commands[@]}" || exit 1
     fi
+    # --milestone-warning: pr-push.sh --mode pr の結果の milestone が unassigned のとき（Closes 対象の Issue に milestone が無い）、
+    # 警告の行を無ければ末尾へ足す（新規作成の経路で pr-push.sh が本文へ足すものと同じ文言）
+    if [ "${milestone_warning}" = 1 ] && ! grep -qF "${MILESTONE_WARNING_PREFIX}#${issue} " "${body}"; then
+      {
+        echo
+        echo "${MILESTONE_WARNING_PREFIX}#${issue} に milestone が割り当てられていない。"
+      } >>"${body}"
+    fi
     ;;
   optin)
     pw_optin_rewrite "${body}" "${optin_sha}" "${optin_results}" "${commands[@]}" || exit 1
     ;;
   oos-append)
     # 本文に既にある threadId の行は足さない
-    : >"${work_dir}/new"
+    : >"${newlines}"
     while IFS= read -r l; do
       t=${l#'- [threadId: '}
       t=${t%%']'*}
-      grep -qF "[threadId: ${t}]" "${body}" || printf '%s\n' "${l}" >>"${work_dir}/new"
-    done <"${work_dir}/add"
-    if [ ! -s "${work_dir}/new" ]; then
+      grep -qF "[threadId: ${t}]" "${body}" || printf '%s\n' "${l}" >>"${newlines}"
+    done <"${add}"
+    if [ ! -s "${newlines}" ]; then
       echo OK
       exit 0
     fi
     # 見出しの行（前後の空白と CR を無視）を探し、その節（次の「#」で始まる見出しの行の手前まで）の最後の空でない行の
     # 後ろへ足す。見出しが無ければ、空行 1 つと見出しを末尾に足してから足す
-    awk -v h="${OOS_HEADING}" -v add="${work_dir}/new" '
+    awk -v h="${OOS_HEADING}" -v add="${newlines}" '
       function trim(s) { sub(/\r$/, "", s); sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
       { line[NR] = $0 }
       END {
@@ -254,8 +293,8 @@ case "${sub}" in
         while ((getline a < add) > 0) print a
         for (i = last + 1; i <= NR; i++) print line[i]
       }
-    ' "${body}" >"${work_dir}/merged" || fail "対象外の行を本文へ足せない"
-    mv -f -- "${work_dir}/merged" "${body}" || fail "一時ファイルを置き換えられない"
+    ' "${body}" >"${merged}" || fail "対象外の行を本文へ足せない"
+    mv -f -- "${merged}" "${body}" || fail "一時ファイルを置き換えられない"
     ;;
 esac
 
@@ -268,10 +307,9 @@ if grep -qF "${OOS_HEADING}" "${orig}" && ! grep -qF "${OOS_HEADING}" "${body}";
   fail "補正後の本文から対象外の節が消える"
 fi
 
-gh pr edit "${pr}" --body-file "${body}" >/dev/null || fail "gh pr edit に失敗"
+pw_gh_pr edit "${pr}" --body-file "${body}" >/dev/null || fail "gh pr edit に失敗"
 
 # 反映の確認: 取り直した本文に、足したものがあること
-after="${work_dir}/after"
 pw_fetch_body "${pr}" "${after}" || fail "更新後の本文を取得できない"
 case "${sub}" in
   ensure)
@@ -286,7 +324,7 @@ case "${sub}" in
       t=${l#'- [threadId: '}
       t=${t%%']'*}
       grep -qF "[threadId: ${t}]" "${after}" || fail "更新後の本文に threadId ${t} の行が無い"
-    done <"${work_dir}/new"
+    done <"${newlines}"
     ;;
 esac
 if [ -n "${optin_sha}" ]; then

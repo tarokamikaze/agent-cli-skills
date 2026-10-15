@@ -87,9 +87,31 @@ pw_verify_written() {
   printf '%s' "${content}" >"$4"
 }
 
+# 対象リポジトリ（owner/name）。空ならカレントディレクトリのリポジトリ。各スクリプトの先頭の --repo が入れる
+# （ホストの args.repo。gh の呼び出しを対象リポジトリへ束縛する）
+PW_REPO=''
+
+# owner/name の形（英数字・.・_・- の 2 要素。先頭は英数字・.. を含まない）。ホストの parseRepoArg を通った値を受け取る
+pw_valid_repo() {
+  case "$1" in
+    '' | *[!A-Za-z0-9._/-]* | [!A-Za-z0-9]* | */ | *//* | *..* | */*/*) return 1 ;;
+    */[A-Za-z0-9._-]*) return 0 ;;
+  esac
+  return 1
+}
+
+# gh pr <サブコマンド> ...。PW_REPO があれば -R で対象リポジトリを明示する
+pw_gh_pr() {
+  if [ -n "${PW_REPO}" ]; then
+    gh pr "$@" -R "${PW_REPO}"
+  else
+    gh pr "$@"
+  fi
+}
+
 # PR 本文を $2 へ書く（旧プロンプトの gh pr view <N> --json body --jq '.body // ""' > "$f" と同じ。本文の後ろに改行 1 つ）
 pw_fetch_body() {
-  gh pr view "$1" --json body --jq '.body // ""' >"$2"
+  pw_gh_pr view "$1" --json body --jq '.body // ""' >"$2"
 }
 
 # opt-in テスト実行記録の節を書き直す（旧プロンプトの optinRecordRewriteLines と同じ手順）。$1 = 本文のファイル、$2 = sha、
