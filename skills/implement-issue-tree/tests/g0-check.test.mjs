@@ -4,6 +4,11 @@
 // 検証する契約: 旧プロンプト（merge-exec の手順 2b (i)〜(v-b)）が agent に実行させていたコマンド（このファイルに固定文字列で
 // 持つ。src から消えたのでここが旧の正本）を同じ入力に対して実行し、旧プロンプトの判定の手順どおりにテスト側で読んだ値・
 // 順序・辞退の reason が、スクリプトの出力（判定ごとの行と verdict）と一致すること。取得の失敗を合格に倒さないこと。
+//
+// 例外（Issue #15。意図して旧手順と結果を変える）: 旧手順に無い判定 (i-a) required-status-check-contexts を (i) の直後に
+// 足した。必須の context が 1 件以上ある構成では、旧手順の出力の (i) の行の直後にこの行を挟んだものと一致すること
+// （withContextsLine）を引き続き検査する。必須の context が 0 件・取得できない構成だけは、旧手順が pass にしうる
+// （ルールはあるが何も必須にしていない）ので、旧手順との一致は検査せず DIVERGENT_CASES で新しい結果を固定する。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -141,6 +146,17 @@ function oldG0(g, bash, base, decl) {
   return end('pass')
 }
 
+// 旧手順の出力に、旧手順に無い (i-a) の行を挟む。(i) で終わった出力（classic-unsupported）には挟まない。値は旧プロンプトの
+// REQ（(v) の式）のうち空でない文字列の件数。1 以上のときだけ使う（0・取得不能の構成は旧手順と結果が変わるので DIVERGENT_CASES）
+const OLD_REQ_CONTEXTS = (base) => [...OLD.vHead(base), `printf '%s' "$REQ" | jq '[.[] | select(type == "string" and length > 0)] | length'`].join('\n')
+function withContextsLine(g, bash, base, oldOut) {
+  const lines = oldOut.trimEnd().split('\n')
+  if (/^required-status-check-rules (0|error)$/.test(lines[0])) return oldOut
+  const n = count(g.old(bash, OLD_REQ_CONTEXTS(base)))
+  assert.match(n, /^[1-9]\d*$/, 'このヘルパーは必須の context が 1 件以上の構成だけに使う')
+  return `${[lines[0], `required-status-check-contexts ${n}`, ...lines.slice(1)].join('\n')}\n`
+}
+
 // --- fixture ---
 const CI = { context: 'ci', integration_id: 15368 }
 const BUGBOT = { context: 'Cursor Bugbot', integration_id: 1001 }
@@ -190,16 +206,54 @@ const CASES = [
   ['(v-b) integration_id が null の required check → issuer-unbound', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([{ context: 'ci', integration_id: null }, BUGBOT]), pr(true)], [rsc([SONAR], 11)]] }), DECL, 'issuer-unbound', 'required-contexts-without-bound-run 1'],
   ['(v-b) 同名の commit status だけで束縛済みの check-run が無い → checks-not-green', (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('Cursor Bugbot', 1001)] }, { check_runs: [checkRun('SonarCloud Code Analysis', 2002)] }] }), DECL, 'checks-not-green', 'required-contexts-without-bound-run 1'],
   ['(v-b) 同名の check-run が別の App から → checks-not-green', (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('ci', 9999), checkRun('Cursor Bugbot', 1001)] }, { check_runs: [checkRun('SonarCloud Code Analysis', 2002)] }] }), DECL, 'checks-not-green', 'required-contexts-without-bound-run 1'],
+  ['(i-a) 空の required_status_checks のルールがあっても、ほかのルールに必須の context があれば通る', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([CI, BUGBOT]), rsc([], 12), pr(true)], [rsc([SONAR], 11)]], 'ruleset-12.json': { id: 12, bypass_actors: [] } }), DECL, 'pass', 'required-contexts-without-bound-run 0'],
+]
+
+// 旧手順と意図して結果を変えるケース（Issue #15）。旧手順の verdict（oldVerdict）は記録として検査し、スクリプトの出力は
+// want で固定する。(i-a) で終わるので、ruleset の bypass・HEAD の check-run / commit status は取得しない
+// [名前, fixture を変える関数, 旧手順の verdict, スクリプトの出力]
+const EMPTY_HEAD = (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ total_count: 0, check_runs: [] }], [`statuses-${SHA}.json`]: [] })
+const DIVERGENT_CASES = [
+  [
+    'ルールはあるが必須の context が 0 件・HEAD にチェックも status も無い（旧手順は pass）→ server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[rsc([]), pr(true)]] }),
+    'pass',
+    'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+  ],
+  [
+    '空のルールが 2 ページに分かれていても 0 件として扱う（旧手順は pass）→ server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[rsc([]), pr(true)], [rsc([], 11)]] }),
+    'pass',
+    'required-status-check-rules 2\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+  ],
+  [
+    '必須の context が 0 件で HEAD にチェックがある（旧手順は (v) で辞退）→ (i-a) で server-enforcement-missing',
+    (f) => ({ ...f, 'rules-main.pages.json': [[rsc([]), pr(true)]] }),
+    'server-enforcement-missing',
+    'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+  ],
+  [
+    'required_status_checks のパラメータが欠落（旧手順は (v) で辞退）→ (i-a) が error で server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[{ type: 'required_status_checks', ruleset_id: 10, ruleset_source_type: 'Repository', parameters: {} }, pr(true)]] }),
+    'server-enforcement-missing',
+    'required-status-check-rules 1\nrequired-status-check-contexts error\nverdict server-enforcement-missing\n',
+  ],
+  [
+    'context が空文字だけ（旧手順は (v-b) まで進む）→ 0 件として server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[rsc([{ context: '', integration_id: 15368 }]), pr(true)]] }),
+    'checks-not-green',
+    'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+  ],
 ]
 
 for (const bash of BASHES) {
   const tag = `[${bash}]`
 
   for (const [name, mutate, decl, verdict, lastCheck] of CASES) {
-    test(`${tag} g0-check.sh: ${name}（旧コマンドを旧手順どおりに読んだ値・順序・reason と同じ）`, () => {
+    test(`${tag} g0-check.sh: ${name}（旧コマンドを旧手順どおりに読んだ値・順序・reason と同じ。(i-a) の行を除く）`, () => {
       const g = setup(mutate(passing()))
       try {
-        const want = oldG0(g, bash, 'main', decl)
+        const want = withContextsLine(g, bash, 'main', oldG0(g, bash, 'main', decl))
         const args = ['main', SHA, ...decl.flatMap((d) => d.contexts.map((c) => g0ContextArg(d.app, c)))]
         writeFileSync(join(g.dir, 'calls.log'), '')
         const r = g.run(bash, args)
@@ -215,6 +269,24 @@ for (const bash of BASHES) {
         assert.ok(calls.every((c) => !c.includes('/protection') && !/(^| )(-X|--method|-f|-F|--field|--input)( |$)/.test(c)), calls.join('\n'))
         // context 文字列・App 名は出さない
         assert.ok(!/Bugbot|SonarCloud|cursor|sonarcloud|日本/.test(r.stdout))
+      } finally {
+        g.done()
+      }
+    })
+  }
+
+  for (const [name, mutate, oldVerdict, want] of DIVERGENT_CASES) {
+    test(`${tag} g0-check.sh: ${name}（旧手順と意図して結果を変える）`, () => {
+      const g = setup(mutate(passing()))
+      try {
+        // 旧手順の結果を記録として確かめる（このケースだけ旧手順との一致を求めない理由）
+        assert.equal(oldG0(g, bash, 'main', []).trimEnd().split('\n').at(-1), `verdict ${oldVerdict}`)
+        writeFileSync(join(g.dir, 'calls.log'), '')
+        const r = g.run(bash, ['main', SHA])
+        assert.equal(r.stdout, want, r.stderr)
+        assert.equal(r.status, 1)
+        const calls = g.calls()
+        assert.deepEqual(calls, ['api repos/{owner}/{repo}/rules/branches/main'], '(i-a) で終わるので、ルールの取得 1 回だけ')
       } finally {
         g.done()
       }

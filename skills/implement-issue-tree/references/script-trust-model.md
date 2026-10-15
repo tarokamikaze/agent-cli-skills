@@ -158,10 +158,10 @@ merge-exec の手順 2b（G0 ゲート: ベースブランチのサーバー側�
 
 | 置き換えた手順 | 新しい形 | 出力 |
 |----------------|----------|------|
-| 手順 2b (i)〜(v-b) | `g0-check.sh <URL エンコード済みのベースブランチ名> <HEAD sha> [<slug>:<エンコード済みの context>...]` | 判定ごとの `<判定名> <値>` の行（固定の 9 種。値は件数・`true` / `false`・取得や計算に失敗したら `error`）と、最後の `verdict <pass / classic-unsupported / server-enforcement-missing / issuer-unbound / checks-not-green>`。終了コードは pass のときだけ 0 |
+| 手順 2b (i)〜(v-b) | `g0-check.sh <URL エンコード済みのベースブランチ名> <HEAD sha> [<slug>:<エンコード済みの context>...]` | 判定ごとの `<判定名> <値>` の行（固定の 10 種。値は件数・`true` / `false`・取得や計算に失敗したら `error`）と、最後の `verdict <pass / classic-unsupported / server-enforcement-missing / issuer-unbound / checks-not-green>`。終了コードは pass のときだけ 0 |
 | 手順 5 | `gh pr merge <N> --squash --delete-branch --match-head-commit <HEAD sha>`（手順 2 で固定した 40 桁の sha を値として直接書く単独のコマンド） | `gh pr merge` のまま |
 
-- 判定の jq の式・判定の順序・辞退の reason は旧プロンプトと同じ。旧手順と同じく、不合格（取得の失敗を含む）になった判定でそれより後の判定を行わずに終わる。required context の式は `lib/gh-read.sh` の `gr_required_contexts_of_pages` を monitor 手順 3g の `required-context-missing.sh` と共用する
+- 判定の jq の式・判定の順序・辞退の reason は旧プロンプトと同じ（例外は下の「旧手順と違う点」の (i-a)）。旧手順と同じく、不合格（取得の失敗を含む）になった判定でそれより後の判定を行わずに終わる。required context の式は `lib/gh-read.sh` の `gr_required_contexts_of_pages` を monitor 手順 3g の `required-context-missing.sh` と共用する
 - (iv) の context は任意の文字列（空白・引用符・`{}` を含みうる）なので、ホストが英数字・`.`・`_`・`-` 以外の全バイトを `%XX`（大文字、UTF-8 のバイト単位）にして渡し（`g0ContextArg`）、スクリプトが元に戻して `jq --arg` に値で渡す。コマンド行に引用符と `{}` は載らない。制御文字（`%00`〜`%1F`・`%7F`）・小文字の 16 進・slug の形式違いは使い方の誤り（exit 2）
 - 信頼の水準は旧プロンプトと同じで、変えていない。G0 を判定して辞退するかを決めるのは旧手順と同じ merge-exec の agent で、読む値（件数・真偽値）も同じ。スクリプトにしたことで変わるのは、jq の式・取得の失敗の扱い・判定の順序を agent が書き間違える余地が無くなることと、launcher のハッシュ照合で版ずれ・書き換えを起動前に止められることである。マージの実強制は従来どおり、G0 が実測するサーバー側の強制（ruleset の required status checks・レビュースレッド解消の必須化・`--match-head-commit`）が持つ（上の「測定値の使い方」の (b)）
 
@@ -170,8 +170,9 @@ merge-exec の手順 2b（G0 ゲート: ベースブランチのサーバー側�
 - ルール（`rules/branches`）と HEAD sha 上の check-run は 1 回ずつだけ取得し、各判定で使い回す。旧手順は判定ごとに同じ API を取り直していた。取り直しの間に ruleset や check-run が変わった場合の値は旧手順と違いうるが、1 回の取得に揃えたほうが判定どうしの前提が食い違わない
 - 取得の失敗の判定の割り当てを明記した。(i) の失敗は classic-unsupported（旧手順の「(i) が 0 件またはエラー」）、(v-b) の 2 つ目の値の計算の失敗は issuer-unbound（旧手順は「1 つ目が 1 以上・取得不能・RSC の取得失敗」を issuer-unbound としていて、2 つ目の取得不能の行き先を明記していなかった。合格にも一過性の checks-not-green にも倒さない側にした）
 - verdict 行が無い・値が想定外・`run-verified.sh` の照合失敗は、merge-exec が server-enforcement-missing として辞退する
+- (i) の直後に、旧手順に無い判定 (i-a) `required-status-check-contexts`（必須の context〔重複なし・空でない文字列〕の件数）を足した（Issue #15）。0 件・取得の失敗は server-enforcement-missing。旧手順は、`required_status_checks` のルールはあるが必須の context が 0 件で、HEAD に check-run も commit status も無い構成で (v) と (v-b) が 0 件どうしになり pass にしていた。必須のチェックが 1 件も無いとサーバー側の強制は何も見ていないので、マージしない側に倒す。(i) の拡張にしないのは、(i) の不合格は classic branch protection の経路（classic-unsupported）を表し、こちらは ruleset の経路で強制を確認できない場合で reason が違うため。(i) の直後に置くのは、ruleset の取得や HEAD のチェックの取得の前に止められ、(i-b) 以降はどれも同じ server-enforcement-missing なので、ほかの構成の verdict を変えないため
 
-回帰防止は `tests/g0-check.test.mjs` で行う。旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`tests/lib/fake-gh.sh`。ruleset と App ID の応答も返す）で同じ入力に対して旧コマンドを実行し、旧プロンプトの判定の手順どおりに読んだ行と verdict が、スクリプトの出力とバイト単位で一致することを、合格・各判定の不合格・各取得の失敗・引用符と非 ASCII を含む context の各場合で確かめる。`/bin/bash`（3.2）と Homebrew の bash の両方で走る。
+回帰防止は `tests/g0-check.test.mjs` で行う。旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`tests/lib/fake-gh.sh`。ruleset と App ID の応答も返す）で同じ入力に対して旧コマンドを実行し、旧プロンプトの判定の手順どおりに読んだ行と verdict が、スクリプトの出力とバイト単位で一致することを、合格・各判定の不合格・各取得の失敗・引用符と非 ASCII を含む context の各場合で確かめる。(i-a) の行は旧手順に無いので、必須の context が 1 件以上の構成では旧手順の出力の (i) の行の直後にこの行を挟んだものと比べる。必須の context が 0 件・取得できない構成は旧手順と意図して結果を変えるので、旧手順の verdict を記録として確かめたうえで、新しい出力を別のケース（`DIVERGENT_CASES`）で固定する。`/bin/bash`（3.2）と Homebrew の bash の両方で走る。
 
 ## 関連
 
