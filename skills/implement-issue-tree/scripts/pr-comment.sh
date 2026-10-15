@@ -2,7 +2,8 @@
 # pr-comment.sh — agent が Write ツールで書いたコメント本文を照合してから、PR にコメントするスクリプト
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる。カレントディレクトリのリポジトリが対象）:
-#   bash pr-comment.sh <PR> <nonce> <sha256>
+#   bash pr-comment.sh [--repo <owner/name>] <PR> <nonce> <sha256>
+#   --repo はホストの args.repo（gh pr comment を対象リポジトリへ束縛する。無ければカレントディレクトリのリポジトリ）
 #
 # 旧プロンプト（最終 Review の Low 指摘のコメント）は agent に gh pr comment <PR> --body "$(cat <<'LOWEOF' ... LOWEOF
 # )" を実行させていた。コメント本文（Review の指摘。未信頼の自由文）がコマンド行の HEREDOC に載るため、ここへ移した
@@ -29,19 +30,24 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 . "${script_dir}/lib/pr-write.sh" || exit 2
 
 usage() {
-  echo "使い方: pr-comment.sh PR番号 nonce sha256" >&2
+  echo "使い方: pr-comment.sh [--repo owner/name] PR番号 nonce sha256" >&2
   exit 2
 }
 
 written=''
-work_dir=''
+body=''
 cleanup() {
   [ -n "${written}" ] && rm -f -- "${written}"
-  [ -n "${work_dir}" ] && rm -rf -- "${work_dir}"
+  [ -n "${body}" ] && rm -f -- "${body}"
   return 0
 }
 trap cleanup EXIT
 
+if [ $# -ge 2 ] && [ "$1" = --repo ]; then
+  pw_valid_repo "$2" || usage
+  PW_REPO=$2
+  shift 2
+fi
 [ $# -ge 2 ] && pw_valid_nonce "$2" || usage
 written=$(pw_written_path "$2")
 [ $# -eq 3 ] && pw_valid_pos_int "$1" || usage
@@ -50,6 +56,6 @@ case "$3" in
 esac
 [ "${#3}" -eq 64 ] || usage
 
-work_dir=$(mktemp -d) || exit 1
-pw_verify_written "$2" "$1" "$3" "${work_dir}/body" || exit 1
-gh pr comment "$1" --body-file "${work_dir}/body"
+body=$(mktemp) || exit 1
+pw_verify_written "$2" "$1" "$3" "${body}" || exit 1
+pw_gh_pr comment "$1" --body-file "${body}"

@@ -1,10 +1,11 @@
-// PR 本文・コメント・resolve の書き込みと opt-in 記録の確認のスクリプト（Issue #11 の範囲 C: scripts/pr-body-edit.sh・
-// optin-record-count.sh・pr-comment.sh・resolve-thread.sh）を、偽の gh（tests/lib/fake-gh.sh。pr edit・pr comment は
-// 書き込みを再現する）に対して実行する回帰テスト。
+// PR 本文・コメントの書き込みと opt-in 記録の確認のスクリプト（Issue #11 の範囲 C: scripts/pr-body-edit.sh・
+// optin-record-count.sh・pr-comment.sh）を、偽の gh（tests/lib/fake-gh.sh。pr edit・pr comment は
+// 書き込みを再現する）に対して実行する回帰テスト。resolve の mutation はスクリプトにしない（scripts/ の静的ガードが
+// GraphQL の mutation の綴りを禁じる）ので、fix の手順 5 は gh api graphql の 1 コマンドのまま。
 //
 // 検証する契約:
 //   - 旧プロンプトが agent に実行させていたコマンド（このファイルに固定文字列で持つ。src から消えたのでここが旧の正本）と
-//     同じ入力に対して、スクリプトが同じ結果（書き戻した PR 本文・投稿したコメント・数えた件数・送った mutation）になること
+//     同じ入力に対して、スクリプトが同じ結果（書き戻した PR 本文・投稿したコメント・数えた件数）になること
 //   - agent が Write ツールで書く自由文は、ホストが渡した SHA-256 と一致するときだけ使い、ファイルは成否に関わらず消すこと
 //   - 本文の取得の失敗・補正後が空・反映の確認の失敗では書き戻さない / 失敗を返すこと（fail-closed）
 // ホストのプロンプトから実際にコマンドと Write する内容を取り出して流す端から端までの確認も行う。
@@ -25,7 +26,7 @@ const BASHES = availableBashes()
 const FAKE_GH = readFileSync(join(HERE, 'lib', 'fake-gh.sh'), 'utf8')
 const defs = await importDefinitions([
   'lowFindingsCommentPrompt', 'prCreatePrompt', 'optinRecordMarkerLine', 'renderOptinRecordSection',
-  'statePatchSha256', 'fileNonce', 'OPTIN_RECORD_HEADING', 'OPTIN_RECORD_MARKER_PREFIX', 'OPTIN_RECORD_HUMAN_PREFIX',
+  'writtenSha256', 'fileNonce', 'OPTIN_RECORD_HEADING', 'OPTIN_RECORD_MARKER_PREFIX', 'OPTIN_RECORD_HUMAN_PREFIX',
   'ensureBoundaryNonceSeed', 'implementPrompt', 'recoverImplementPrompt', 'fixPrompt', 'WRITTEN_FILE_COMMIT_GUARD',
 ], 'write-scripts')
 // fixPrompt は境界トークンの seed を要する。seed の agent だけを stub にして入れる
@@ -69,10 +70,14 @@ const OLD = {
   ].join('\n'),
   // lowFindingsCommentPrompt（コメント本文は HEREDOC）
   comment: (pr, body) => `gh pr comment ${pr} --body "$(cat <<'LOWEOF'\n${body}\nLOWEOF\n)"`,
-  // fixPrompt 手順 5
-  resolve: (tid) => `gh api graphql -f query='mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}}' -F tid=${tid}`,
 }
 
+const REAL_GREP = spawnSync('bash', ['-c', 'command -v grep'], { encoding: 'utf8' }).stdout.trim()
+// PR 作成の手順 1c の ensure にホストが渡すブランチ名・ベース名（encodeURIComponent。/ は %2F）と、偽の gh の PR の head・base
+const HEAD = 'feat/42-x'
+const BASE = 'main'
+const REFS = [encodeURIComponent(HEAD), encodeURIComponent(BASE)]
+const PR_REFS = { headRefName: HEAD, baseRefName: BASE, isCrossRepository: false }
 const enc = (c) => c.replaceAll(' ', '%20')
 const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
 const bound = (nonce, scope, text) => sha256(`${nonce}\n${scope}\n${text}`)
@@ -114,8 +119,8 @@ test('lib/pr-write.sh の固定文字列はホストの OPTIN_RECORD_* と同じ
   assert.ok(lib.includes(`PW_OPTIN_HUMAN_PREFIX='${OPTIN_RECORD_HUMAN_PREFIX}'`))
 })
 
-test('ホストの照合値（statePatchSha256）と nonce（fileNonce）はスクリプトの照合の定義と同じ形', () => {
-  assert.equal(defs.statePatchSha256('n1', 42, 'x\ny'), bound('n1', 42, 'x\ny'))
+test('ホストの照合値（writtenSha256）と nonce（fileNonce）はスクリプトの照合の定義と同じ形', () => {
+  assert.equal(defs.writtenSha256('n1', 42, 'x\ny'), bound('n1', 42, 'x\ny'))
   assert.match(defs.fileNonce('a'), /^[0-9a-f]{32}$/)
   assert.notEqual(defs.fileNonce('a'), defs.fileNonce('b'))
 })
@@ -137,7 +142,7 @@ test('コミットを作る手順（Implement・recover-implement・fix・PR 作
   // PR 作成は自分でコミットを作るのが base 取り込みの解消だけなので、その git commit の手前で消させる
   const pr = defs.prCreatePrompt(item, impl, [])
   const at = pr.indexOf('rm -f -- .implement-issue-tree-*.md')
-  assert.ok(at > 0 && at < pr.indexOf('git commit --no-edit でコミットする', at), 'PR 作成の base 取り込みの解消で、git commit の前にある')
+  assert.ok(at > 0 && at < pr.indexOf('git commit -F <そのファイル>', at), 'PR 作成の base 取り込みの解消で、git commit の前にある')
   // 消す形は、Write したファイルだけを消し、ほかのファイルを残す
   const dir = mkdtempSync(join(tmpdir(), 'iit-guard-'))
   try {
@@ -170,6 +175,11 @@ for (const bash of BASHES) {
     for (const s of [
       'Closes #12', 'closes #12', 'FIXES #3', 'fixed: #7', 'Resolve #1', 'resolved  #99', 'see (fix #4)',
       'Closes other-owner/other-repo#5', 'fixes https://github.com/o/r/issues/8', 'close\t#2',
+      // GitHub が閉じるかは確かめていないが、拒否する側に倒す形（GH-N の参照・コロンの後に空白なし・keyword と参照の間の ( < [）
+      'fixes GH-12', 'closes:#12', 'Closes (#12)', 'Closes <https://github.com/o/r/issues/12>',
+      'Closes [#12](https://github.com/o/r/issues/12)', 'fix: (#4)', 'resolves [o/r#9]',
+      // www 付きの URL
+      'fixes https://www.github.com/o/r/issues/8', 'Closes <https://WWW.github.com/o/r/pull/3>',
     ]) {
       const g = setup()
       g.setBody(4, 'Closes #1\n')
@@ -182,13 +192,77 @@ for (const bash of BASHES) {
       g.done()
     }
     // closing keyword の形でないものは書ける
-    for (const s of ['fix の手順で直す', 'closes the gap (#12 とは別)', 'prefix #3', 'Issue #12 に関連', 'disclose #5 の扱い', 'unresolved #6']) {
+    for (const s of [
+      'fix の手順で直す', 'closes the gap (#12 とは別)', 'prefix #3', 'Issue #12 に関連', 'disclose #5 の扱い', 'unresolved #6',
+      'unfixed #3', 'fix の手順 #3', 'GH-12 を参照', 'prefix: (#3)',
+    ]) {
       const g = setup()
       g.setBody(4, 'Closes #1\n')
       g.write(nonce, line(s))
       const r = g.run(bash, 'pr-body-edit.sh', ['oos-append', '4', nonce, 'T1'])
       assert.equal(r.status, 0, `${s}: ${r.stderr}`)
       assert.ok(g.body(4).includes(line(s)), s)
+      g.done()
+    }
+  })
+
+  test(`${tag} pr-body-edit.sh oos-append: closing keyword の検査の grep がエラー（終了コード 2）を返したら、その行を通さず失敗する`, () => {
+    const nonce = 'c'.repeat(32)
+    const g = setup()
+    try {
+      // 検査の grep（-qiE）だけを終了コード 2 にする偽の grep を、偽の gh と同じ PATH の先頭に置く
+      writeFileSync(join(g.dir, 'bin', 'grep'), `#!/bin/bash\nfor a in "$@"; do\n  if [ "$a" = -qiE ]; then\n    echo 'grep: simulated error' >&2\n    exit 2\n  fi\ndone\nexec ${REAL_GREP} "$@"\n`)
+      chmodSync(join(g.dir, 'bin', 'grep'), 0o755)
+      g.setBody(4, 'Closes #1\n')
+      g.write(nonce, '- [threadId: T1] 範囲外の指摘')
+      const r = g.run(bash, 'pr-body-edit.sh', ['oos-append', '4', nonce, 'T1'])
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /^FAILED: .*検査できない/m)
+      assert.equal(g.calls().length, 0, 'gh を呼ばない')
+      assert.equal(g.body(4), 'Closes #1\n')
+      assert.ok(!g.written(nonce), 'ファイルを残さない')
+    } finally {
+      g.done()
+    }
+  })
+
+  test(`${tag} --repo: pr-body-edit.sh・pr-comment.sh・optin-record-count.sh は gh pr の呼び出しをすべて -R で対象リポジトリへ束縛する。不正な形は exit 2`, () => {
+    const g = setup()
+    try {
+      g.setBody(7, '## Summary\n', { headRefOid: SHA_A, ...PR_REFS })
+      // ensure の head・base の照合（gh pr view --json headRefName,baseRefName,isCrossRepository）も -R で束縛する
+      const e = g.run(bash, 'pr-body-edit.sh', ['--repo', 'o/r', 'ensure', '7', '42', ...REFS])
+      assert.equal(e.status, 0, e.stderr)
+      const nonce = 'd'.repeat(32)
+      g.write(nonce, 'コメント')
+      const c = g.run(bash, 'pr-comment.sh', ['--repo', 'o/r', '7', nonce, bound(nonce, 7, 'コメント')])
+      assert.equal(c.status, 0, c.stderr)
+      const n = g.run(bash, 'optin-record-count.sh', ['--repo', 'o/r', '7', enc('make e2e')])
+      assert.equal(n.status, 0, n.stderr)
+      const pr = g.calls().filter((x) => x.startsWith('pr '))
+      assert.ok(pr.length >= 5, pr.join('\n'))
+      assert.ok(pr.includes('pr view 7 --json headRefName,baseRefName,isCrossRepository -R o/r'), pr.join('\n'))
+      for (const x of pr) assert.match(x, / -R o\/r$/, x)
+      for (const bad of ['o', 'o/r/x', '../r', 'o//r', '-x/r', 'o r/x']) {
+        assert.equal(g.run(bash, 'pr-body-edit.sh', ['--repo', bad, 'ensure', '7', '42', ...REFS]).status, 2, bad)
+      }
+    } finally {
+      g.done()
+    }
+  })
+
+  test(`${tag} pr-body-edit.sh ensure --milestone-warning: pr-push.sh と同じ警告の行を無ければ足し、2 回目は足さない`, () => {
+    const g = setup()
+    try {
+      g.setBody(7, '## Summary\n\nCloses #42\n', PR_REFS)
+      for (let i = 0; i < 2; i++) {
+        const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '7', '42', ...REFS, '--milestone-warning'])
+        assert.equal(r.status, 0, r.stderr)
+      }
+      const warn = '> **警告**: Closes 対象の #42 に milestone が割り当てられていない。'
+      assert.equal(g.body(7).split(warn).length - 1, 1)
+      assert.ok(readFileSync(join(SCRIPTS, 'pr-push.sh'), 'utf8').includes('> **警告**: Closes 対象の #%s に milestone が割り当てられていない。'), 'pr-push.sh と同じ文言')
+    } finally {
       g.done()
     }
   })
@@ -227,8 +301,8 @@ for (const bash of BASHES) {
         assert.equal(old.status, 0, old.stderr)
         // 新
         const n = setup()
-        n.setBody(7, initial)
-        const args = ['ensure', '7', '42', ...(optin ? ['--optin', SHA_B, 'pass,pass', ...commands.map(enc)] : [])]
+        n.setBody(7, initial, PR_REFS)
+        const args = ['ensure', '7', '42', ...REFS, ...(optin ? ['--optin', SHA_B, 'pass,pass', ...commands.map(enc)] : [])]
         const r = n.run(bash, 'pr-body-edit.sh', args)
         assert.equal(r.status, 0, r.stderr)
         assert.equal(r.stdout, 'OK\n')
@@ -295,9 +369,9 @@ for (const bash of BASHES) {
       [`Closes #42\n\n${OOS_HEADING}\n- 既存\n`, `Closes #42\n\n${OOS_HEADING}\n- 既存\n\n`],
     ]) {
       const g = setup()
-      g.setBody(3, initial)
+      g.setBody(3, initial, PR_REFS)
       g.write(nonce, `${section}\n`)
-      const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', '--oos', nonce, sha])
+      const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', ...REFS, '--oos', nonce, sha])
       assert.equal(r.status, 0, r.stderr)
       assert.equal(g.body(3), expected)
       assert.ok(!g.written(nonce), 'Write ツールで書いたファイルを消す')
@@ -310,12 +384,58 @@ for (const bash of BASHES) {
       ['ファイルが無い', null, sha],
     ]) {
       const g = setup()
-      g.setBody(3, '## Summary\n')
+      g.setBody(3, '## Summary\n', PR_REFS)
       if (text !== null) g.write(nonce, text)
-      const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', '--oos', nonce, hash])
+      const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', ...REFS, '--oos', nonce, hash])
       assert.equal(r.status, 1, name)
       assert.equal(g.calls().length, 0, `${name}: gh を呼ばない`)
       assert.ok(!g.written(nonce), `${name}: ファイルを残さない`)
+      g.done()
+    }
+  })
+
+  test(`${tag} pr-body-edit.sh ensure: PR の head・base がホストの渡したブランチ名・ベース名と一致しなければ、gh pr edit を呼ばずに失敗する`, () => {
+    const nonce = 'f'.repeat(32)
+    const section = `${OOS_HEADING}\n- 別 Issue にする作業`
+    const sha = bound(nonce, 42, section)
+    // [名前, 偽の gh の PR の項目, 追加の fixture]
+    const cases = [
+      ['head が違う（別の PR の番号）', { ...PR_REFS, headRefName: 'feat/43-y' }, {}],
+      ['base が違う', { ...PR_REFS, baseRefName: 'develop' }, {}],
+      ['head の接頭辞だけ一致', { ...PR_REFS, headRefName: `${HEAD}-2` }, {}],
+      ['head・base が無い', {}, {}],
+      ['head が null', { ...PR_REFS, headRefName: null }, {}],
+      // fork からの PR（head ブランチ名が同じでも別物）と、isCrossRepository が null・欠落のもの（ホストの prBindingProblem と同じ基準）
+      ['fork からの PR', { ...PR_REFS, isCrossRepository: true }, {}],
+      ['isCrossRepository が null', { ...PR_REFS, isCrossRepository: null }, {}],
+      ['isCrossRepository が無い', { headRefName: HEAD, baseRefName: BASE }, {}],
+      ['取得に失敗', PR_REFS, { 'err-prview-3': 'HTTP 502' }],
+    ]
+    for (const [name, refs, extra] of cases) {
+      for (const oos of [false, true]) {
+        const g = setup(extra)
+        g.setBody(3, '## Summary\n', refs)
+        if (oos) g.write(nonce, section)
+        const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', ...REFS, ...(oos ? ['--oos', nonce, sha] : [])])
+        assert.equal(r.status, 1, `${name}: ${r.stderr}`)
+        assert.equal(r.stdout, '', name)
+        assert.match(r.stderr, /^FAILED: /m, name)
+        assert.ok(!g.calls().some((c) => c.startsWith('pr edit')), `${name}: gh pr edit を呼ばない`)
+        assert.ok(g.calls().every((c) => c === 'pr view 3 --json headRefName,baseRefName,isCrossRepository'), `${name}: 照合の前に本文を取得しない（${g.calls()}）`)
+        assert.equal(g.body(3), '## Summary\n', name)
+        assert.ok(!g.written(nonce), `${name}: ファイルを残さない`)
+        g.done()
+      }
+    }
+    // 一致すれば書き戻す。/ を含むブランチ名は %2F で渡す
+    const g = setup()
+    try {
+      g.setBody(3, '## Summary\n', { headRefName: 'release/v1.2-fix', baseRefName: 'release/v1.2', isCrossRepository: false })
+      const r = g.run(bash, 'pr-body-edit.sh', ['ensure', '3', '42', 'release%2Fv1.2-fix', 'release%2Fv1.2'])
+      assert.equal(r.status, 0, r.stderr)
+      assert.ok(g.body(3).includes('Closes #42'))
+      assert.equal(g.calls()[0], 'pr view 3 --json headRefName,baseRefName,isCrossRepository', '照合を最初に行う')
+    } finally {
       g.done()
     }
   })
@@ -372,7 +492,10 @@ for (const bash of BASHES) {
         ['optin', '1', SHA_A, 'pass,pass', 'make'], ['optin', '1', SHA_A, 'ok', 'make'], ['optin', '1', SHA_A, 'pass', 'make e2e'],
         ['optin', '1', SHA_A, 'pass', 'make%22x'], ['optin', '1', SHA_A, 'pass', '-make'], ['optin', '1', SHA_A, 'pass', "make'"],
         ['ensure', '1'], ['ensure', '1', '2', '--oos', 'N', 'a'.repeat(64)], ['ensure', '1', '2', '--oos', 'n', 'x'],
-        ['ensure', '1', '2', '--other'], ['oos-append', '1', 'n'], ['oos-append', '1', 'n', 'T;1'], ['other', '1'],
+        ['ensure', '1', '2', '--other'], ['ensure', '1', '2', 'feat%2Fx'], ['ensure', '1', '2', 'feat/x', 'main'],
+        ['ensure', '1', '2', 'a..b', 'main'], ['ensure', '1', '2', 'feat%20x', 'main'], ['ensure', '1', '2', '%2Ffeat', 'main'],
+        ['ensure', '1', '2', 'feat%2Fx', ''], ['ensure', '1', '2', 'feat%2Fx', 'main', '--oos', 'N', 'a'.repeat(64)],
+        ['oos-append', '1', 'n'], ['oos-append', '1', 'n', 'T;1'], ['other', '1'],
       ]) {
         const r = g.run(bash, 'pr-body-edit.sh', bad)
         assert.equal(r.status, 2, bad.join(' '))
@@ -456,25 +579,6 @@ for (const bash of BASHES) {
     }
   })
 
-  test(`${tag} resolve-thread.sh: 旧コマンドと同じ mutation を送り、出力と終了コードをそのまま返す`, () => {
-    const g = setup({ 'graphql.json': { data: { resolveReviewThread: { thread: { id: 'PRRT_x1', isResolved: true } } } } })
-    try {
-      const old = g.old(bash, OLD.resolve('PRRT_x1'))
-      const r = g.run(bash, 'resolve-thread.sh', ['PRRT_x1'])
-      assert.equal(r.status, 0, r.stderr)
-      assert.equal(r.stdout, old.stdout)
-      const [oc, nc] = g.calls()
-      // threadId は -f（文字列）で渡す（旧コマンドの -F は数値・真偽値に見える値を型変換する）。それ以外は同じ
-      assert.equal(oc, 'api graphql -f query=mutation($tid:ID!){resolveReviewThread(input:{threadId:$tid}){thread{id isResolved}}} -F tid=PRRT_x1')
-      assert.equal(nc, oc.replace('-F tid=', '-f tid='), '同じ mutation')
-      writeFileSync(join(g.dir, 'err-graphql'), 'GraphQL: Could not resolve to a node')
-      assert.equal(g.run(bash, 'resolve-thread.sh', ['PRRT_x1']).status, 1)
-      for (const bad of [[], ['a b'], ['x;y'], ['a', 'b'], ['x'.repeat(101)]]) assert.equal(g.run(bash, 'resolve-thread.sh', bad).status, 2, bad.join(' '))
-    } finally {
-      g.done()
-    }
-  })
-
   test(`${tag} 端から端まで: ホストのプロンプトの Write する内容とコマンドをそのまま使うと、照合を通って書き込める`, () => {
     // Low 指摘のコメント
     const low = defs.lowFindingsCommentPrompt({ number: 5 }, 21, '指摘 A: `x` を直す $HOME')
@@ -488,12 +592,14 @@ for (const bash of BASHES) {
       assert.ok(readFileSync(join(g.dir, 'comment-21.md'), 'utf8').startsWith('## 最終 Review で許容した Low 指摘'))
       // PR 作成の手順 1c の対象外節
       const pr = defs.prCreatePrompt({ number: 42, title: 't' }, { prNumber: 0, branch: 'feat/42-x' }, ['範囲外の作業 $x'])
-      const [, n2, h2] = pr.match(/ensure <番号> 42 --oos ([0-9a-z]+) ([0-9a-f]{64})/)
+      // ホストはブランチ名・ベース名を URL エンコードして ensure に渡す
+      const [, headArg, baseArg, n2, h2] = pr.match(/ensure <番号> 42 (\S+) (\S+) --oos ([0-9a-z]+) ([0-9a-f]{64})/)
+      assert.deepEqual([headArg, baseArg], REFS)
       const sec = pr.split(`=== UNTRUSTED_${n2}_BEGIN ===\n`)[1].split(`\n=== UNTRUSTED_${n2}_END ===`)[0]
       assert.ok(sec.startsWith(OOS_HEADING))
-      g.setBody(30, '## Summary\n')
+      g.setBody(30, '## Summary\n', PR_REFS)
       g.write(n2, sec)
-      const e = g.run(bash, 'pr-body-edit.sh', ['ensure', '30', '42', '--oos', n2, h2])
+      const e = g.run(bash, 'pr-body-edit.sh', ['ensure', '30', '42', headArg, baseArg, '--oos', n2, h2])
       assert.equal(e.status, 0, e.stderr)
       assert.ok(g.body(30).includes(`${sec}\n`))
     } finally {

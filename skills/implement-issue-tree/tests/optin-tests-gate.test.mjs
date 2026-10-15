@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -23,7 +24,7 @@ if (markerIndex < 0) {
 }
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-optin-defs-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-optin-defs-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-optin-defs.mjs')
 const SLICE_EXPORTS = [
   'validateOptinCommandForm',
@@ -585,7 +586,7 @@ test('prCreatePrompt: 宣言なし（item.optinTests: []）は出力が無変更
   const withEmpty = prCreatePrompt({ ...item, optinTests: [] }, impl, [])
   const withoutField = prCreatePrompt({ number: 42, title: 'サンプルイシュー' }, impl, [])
   assert.equal(withEmpty, withoutField)
-  assert.match(withEmpty, /1 件以上の場合のみ手順 1 へ進む。/)
+  assert.match(withEmpty, /1\. push（Bash の timeout に 600000 を指定）/)
   assert.doesNotMatch(withEmpty, /0b2/)
 })
 
@@ -615,7 +616,7 @@ test('prCreatePrompt: 手順 0c ではコード修正を禁止し fail をその
   assert.match(p, /result: "fail"/)
   const statusIdx = p.indexOf('git status --porcelain')
   assert.ok(statusIdx >= 0, 'prCreatePrompt に git status --porcelain の確認がない')
-  assert.ok(statusIdx < p.indexOf('1. git push origin HEAD:'), '作業ツリー確認が push より後にある')
+  assert.ok(statusIdx < p.indexOf('1. push（Bash の timeout'), '作業ツリー確認が push より後にある')
   assert.match(p, /git status --porcelain[^\n]*prNumber: 0/)
 })
 
@@ -626,7 +627,7 @@ test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に po
   const preIdx = p.indexOf('0b2. 期待 SHA の取得（必須。手順 0c のテスト実行より前に行う）: git rev-parse HEAD')
   const testIdx = p.indexOf('0c. opt-in テスト実行記録')
   const verifyIdx = p.indexOf('0d. push 前の不変確認')
-  const pushIdx = p.indexOf('1. git push origin HEAD:')
+  const pushIdx = p.indexOf('1. push（Bash の timeout')
   assert.ok(preIdx >= 0, '期待 SHA をテスト前に取得する指示がない')
   assert.ok(testIdx >= 0 && verifyIdx >= 0 && pushIdx >= 0)
   assert.ok(preIdx < testIdx, '期待 SHA の取得がテスト実行より後にある')
@@ -638,12 +639,9 @@ test('prCreatePrompt: 期待 SHA をテスト実行前に控え、push 前に po
   assert.match(verifyLine, /<sha> は期待 SHA/)
   // 記録節の書き直し（既存 PR 再利用経路）も期待 SHA を使う。
   assert.match(p, /手順 0b2 で控えた期待 SHA（手順 0d で HEAD との一致を確認済み/)
-  // 期待 SHA の参照は独立手順 0b2 だけを指し、差分ゼロチェック（0b）を指す字面は残さない。
-  // 0b は宣言ありなら 0b2 へ進ませ、SHA 取得を飛ばす読み方を許さない（PR #508 Bugbot Medium / codex P2）。
+  // 期待 SHA の参照は独立手順 0b2 だけを指す（差分ゼロの確認は push モードへ移り、手順 0b は無い。SHA 取得を飛ばす読み方を許さない）
   assert.doesNotMatch(p, /手順 0b で控え/)
-  const zeroDiffLine = p.slice(p.indexOf('0b. push 前 差分ゼロチェック'), p.indexOf('\n', p.indexOf('0b. push 前 差分ゼロチェック')))
-  assert.match(zeroDiffLine, /1 件以上の場合のみ手順 0b2 へ進む。$/)
-  assert.doesNotMatch(zeroDiffLine, /期待 SHA/)
+  assert.doesNotMatch(p, /0b\. /)
   assert.match(p.slice(preIdx, testIdx), /取得できた場合のみ手順 0c へ進む/)
 })
 
@@ -803,7 +801,7 @@ const FAKE_GH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'lib'
 const JQ_DIR = dirname(execFileSync('/usr/bin/which', ['jq'], { encoding: 'utf8' }).trim())
 
 function applyRecordRewrite(bodyText, commands, sha, result, env) {
-  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-rewrite-')))
   const bodyPath = join(dir, 'body.md')
   writeFileSync(bodyPath, bodyText)
   return runRecordRewrite(bodyPath, commands, sha, result, env)
@@ -812,8 +810,9 @@ function applyRecordRewrite(bodyText, commands, sha, result, env) {
 // bodyPath の内容を PR #123 の本文として偽の gh に置き、pr-body-edit.sh optin を実行する。成功したら書き戻された本文を
 // bodyPath へ写して返す。失敗（非 0）は status 3 の例外にし、bodyPath は変えない。
 // env を渡すと PATH を差し替える（/usr/bin 先頭に固定して、macOS では BSD grep〔/usr/bin/grep〕で除去を実際に走らせる
-// 確認に使う。PR #505 codex P1。偽の gh が使う jq の場所は後ろに足す）。
-function runRecordRewrite(bodyPath, commands, sha, result, env = process.env) {
+// 確認に使う。PR #505 codex P1。偽の gh が使う jq の場所は後ろに足す）。一時ファイルはテスト専用の追跡ディレクトリに置く。
+function runRecordRewrite(bodyPath, commands, sha, result, baseEnv = process.env) {
+  const env = { ...baseEnv, TMPDIR: trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-scratch-'))) }
   const dir = dirname(bodyPath)
   const bin = join(dir, 'bin')
   mkdirSync(bin, { recursive: true })
@@ -867,7 +866,7 @@ test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定�
 test('記録節の書き直し: 本文が記録節だけ（除去後に空）の場合はスクリプトが非 0 で終わり、本文を更新しない（fail-closed。Issue #502）', () => {
   const commands = ['make e2e']
   const onlyRecord = `${OPTIN_RECORD_HEADING}\n${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\n${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\n`
-  const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), 'optin-record-rewrite-')))
   const bodyPath = join(dir, 'body.md')
   writeFileSync(bodyPath, onlyRecord)
   assert.throws(() => runRecordRewrite(bodyPath, commands, SHA_B, 'pass'), (e) => e.status === 3)
@@ -904,7 +903,7 @@ test('記録節の書き直し: 追記する記録節は固定形式の行のみ
     assert.doesNotMatch(text, /- 補足:|OPTIN_NONCE/)
   }
   assert.match(update, /pr-body-edit\.sh optin 123 /)
-  assert.match(pr, /pr-body-edit\.sh ensure <番号> 42 --optin /)
+  assert.match(pr, /pr-body-edit\.sh ensure <番号> 42 feat%2F42-sample main --optin /)
 })
 
 test('記録節の書き直し: 除去パターンの元になる 3 定数は ERE メタ文字・単一引用符を含まない（エスケープ不要の前提を固定。PR #505 codex P1）', () => {
@@ -1063,7 +1062,7 @@ test('駆動部: post-push fix 直後の updateState が optinFixState（runs + 
   assert.match(driverPart, /optinFixStatePatch = \{ attempted: true, runs: fixOptinRuns, headSha: fixHeadSha, unbound: false \}/)
   assert.match(driverPart, /const optinFixPatchArgs = \{ fixCount, baseMergeCount, worktree: currentWorktreePath,/)
   assert.match(driverPart, /optinFixState: optinFixStatePatch \}/)
-  assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath \}\)/)
+  assert.match(driverPart, /updateState\(item\.number, optinFixPatchArgs, \{ cleanupWorktree: oldWorktreePath, replacementWorktree: currentWorktreePath \}\)/)
 })
 
 test('駆動部: post-push fix が optinHeadSha を報告しない・不正な場合は unbound: true を合成しログ警告する（セキュリティ監査 Medium）', () => {
@@ -1092,7 +1091,7 @@ test('駆動部: runMergeLoop の lastFixOptin 初期値は initialFixOptin を�
 })
 
 test('駆動部: merge-exec 呼び出しに optinGateHeadSha（TOCTOU 対策の期待 HEAD sha）が渡される（PR #503 3 巡目 codex P1）', () => {
-  assert.match(driverPart, /mergeExecutePrompt\(item, impl, allowMerge, externalCheckEntries, optinGateHeadSha\)/)
+  assert.match(driverPart, /mergeExecutePrompt\(item, impl, allowMerge, externalCheckEntries, optinGateHeadSha, gateNonce\)/)
   assert.match(driverPart, /optinGateHeadSha = sanitizeSha\(optinVerify\?\.headRefOid\)/)
 })
 

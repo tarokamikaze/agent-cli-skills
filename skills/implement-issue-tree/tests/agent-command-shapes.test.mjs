@@ -26,7 +26,7 @@ const DEF_EXPORTS = [
   'CMD_RECORDER', 'ensureBoundaryNonceSeed', 'loadState', 'updateStateDetailed', 'persistPerWorktreeByteReserveHighWater',
   'setPerWorktreeByteReserveHighWater', 'scanOrphanWorktrees', 'countWorktreeRecords', 'measureResidualWorktreeBytes',
   'measureFreeDiskKib', 'scanMainWorktreeUntracked', 'scanMainWorktreeHead', 'sweepClosedWorktrees', 'initAllPending',
-  'writeBlockedStateChunk', 'verifyDiscardSafety', 'declaredDepsPrompt', 'outOfTreeStatePrompt', 'rootAncestorsPrompt',
+  'writeBlockedStateChunk', 'precheckScriptHashes', 'declaredDepsPrompt', 'outOfTreeStatePrompt', 'rootAncestorsPrompt',
   'prereqProbePrompt', 'planPrompt', 'reviewPrompt', 'lowFindingsCommentPrompt', 'implementPrompt', 'monitorPrompt',
   'mergeExecutePrompt', 'mergeVerifyPrompt', 'optinRecordVerifyPrompt', 'prCreatePrompt', 'fixPrompt', 'baseMergePrompt',
   'closePrompt', 'recoverPrompt', 'recoverImplementPrompt',
@@ -96,8 +96,7 @@ async function collect() {
     await call(() => d.sweepClosedWorktrees(['/repo/wt/9']))
     await call(() => d.initAllPending([{ number: 5, kind: 'implement' }, { number: 6, kind: 'verify-close' }]))
     await call(() => d.writeBlockedStateChunk([{ number: 5, patch: { status: 'blocked' } }], 'state:update-batch:1'))
-    await call(() => d.verifyDiscardSafety(5, '/repo/wt/5', 'feat/5-x'))
-    await call(() => d.verifyDiscardSafety(5, '', ''))
+    await call(() => d.precheckScriptHashes())
     await call(() => d.declaredDepsPrompt([5, 6]))
     await call(() => d.outOfTreeStatePrompt([7]))
     await call(() => d.rootAncestorsPrompt(5))
@@ -152,90 +151,105 @@ test('目印 cmd() を付けたコマンドは (a)〜(d) のどれにも当た�
   assert.deepEqual(bad, [])
 })
 
-test('範囲 A で同梱スクリプト・単独のコマンドへ移した箇所が、マトリクスで実際に組み立てられている', () => {
+test('同梱スクリプト・単独のコマンドへ移した箇所が、マトリクスで実際に組み立てられている', () => {
   const all = collected.recorded.join('\n')
   for (const name of [
-    'nonce-seed.sh', 'checks-total.sh', 'compare-files.sh', 'external-check-runs.sh', 'required-context-missing.sh',
-    'unresolved-threads.sh', 'checks-state-counts.sh', 'review-state-counts.sh',
+    // fork で同梱スクリプトにしたもの（状態ファイル・GitHub の読み取り）
+    // state-verify.sh は loadState の 2 段目で、記録用の agent が 1 段目に null を返すため組み立てまで進まない（state-scripts.test.mjs が見る）
+    'nonce-seed.sh', 'compare-files.sh', 'state-read.sh', 'fetch-tree.sh', 'fetch-root-ancestors.sh',
+    'probe-declared-deps.sh', 'probe-prereqs.sh',
+    // upstream の同梱スクリプト（状態ファイルの書き込み・CI の観測・マージ直前の検証・push・掃除・測定）
+    'state.sh', 'observe-pr.sh', 'merge-gate.sh', 'pr-push.sh', 'worktree-remove.sh', 'measure-residual-bytes.sh',
+    // PR 本文・コメントの書き込みと opt-in 記録の確認（自由文は Write ツールのファイルで渡す）
+    'pr-body-edit.sh', 'pr-comment.sh', 'optin-record-count.sh',
   ]) {
     assert.ok(all.includes(` ${name}`), `${name} を起動するコマンドが組み立てられていない`)
   }
   assert.ok(all.includes(`bash '${STUB_SKILL_DIR}/scripts/run-verified.sh' `))
-  assert.ok(collected.recorded.includes('git rev-parse --verify "refs/remotes/origin/feat/5-x"'), 'PR 作成 1b の rev-parse')
   assert.ok(collected.recorded.includes('git fetch origin'), 'Implement・recover-implement・fix の fetch を単独にした')
-  assert.ok(all.includes('required-context-missing.sh release%2Fv1.2 <HEAD sha>'), 'ベースブランチは URL エンコードして渡す')
+  // 状態ファイルへの書き込みは JSON をコマンド行に載せず、Write ツールの入力ファイルを照合値付きで読ませる
+  assert.ok(collected.recorded.some((c) => / state\.sh --file _\/issue-trees\/1\.json merge --input-nonce [0-9a-z]+ --input-sha [0-9a-f]{64}$/.test(c)))
+  assert.ok(collected.recorded.some((c) => / state\.sh --file _\/issue-trees\/1\.json init --input-nonce [0-9a-z]+ --input-sha [0-9a-f]{64}$/.test(c)))
+  assert.ok(all.includes(' state.sh --file _/issue-trees/1.json clear-worktree --issue 5'), '掃除後の .worktree のクリア')
+  // closePrompt の子孫の再帰取得と、コメント・クローズの単独のコマンド
+  assert.ok(all.includes(' fetch-tree.sh 5'))
+  for (const c of ['gh issue comment 5 --body-file <そのファイルの絶対パス>', 'gh issue close 5']) {
+    assert.ok(collected.recorded.includes(c), `単独のコマンドにした ${c}`)
+  }
 })
 
-test('範囲 C で同梱スクリプトへ移した書き込み（PR 本文・コメント・resolve）と opt-in 記録の確認が、マトリクスで組み立てられている', () => {
+test('再利用 PR の本文の補正は、ブランチ名・ベース名を URL エンコードして渡す。コミットの前に一時ファイルの除外設定を起動させる（Issue #18・#21）', () => {
   const all = collected.recorded.join('\n')
-  for (const name of ['pr-body-edit.sh', 'optin-record-count.sh', 'pr-comment.sh', 'resolve-thread.sh']) {
-    assert.ok(all.includes(` ${name}`), `${name} を起動するコマンドが組み立てられていない`)
-  }
-  // opt-in テストのコマンドは空白を %20 にして渡す（引用符を使わない）
-  assert.ok(all.includes('pr-body-edit.sh optin 1005 <sha> <results> make%20e2e'), 'fix の手順 4b')
-  assert.ok(all.includes('pr-body-edit.sh ensure <番号> 5 --oos '), 'PR 作成の手順 1c（対象外節あり）')
-  assert.ok(all.includes(' --optin <sha> <results> make%20e2e'), 'PR 作成の手順 1c（opt-in 記録節）')
-  assert.ok(all.includes('optin-record-count.sh 1005 make%20e2e'), 'マージ前の opt-in 記録の確認')
-  assert.ok(all.includes('pr-body-edit.sh oos-append 1005 '), 'fix の手順 6')
-  assert.ok(all.includes('resolve-thread.sh <threadId>'), 'fix の手順 5')
-  for (const c of collected.recorded.filter((x) => /pr-body-edit|optin-record-count|pr-comment|resolve-thread/.test(x))) {
+  // スクリプトが PR の head・base・isCrossRepository と照合する
+  assert.match(all, / pr-body-edit\.sh (--repo \S+ )?ensure <番号> 5 feat%2F5-x main --oos /, 'PR 作成の手順 1c（対象外節あり）')
+  assert.match(all, / pr-body-edit\.sh (--repo \S+ )?ensure <番号> 6 feat%2F5-x release%2Fv1\.2/, 'PR 作成の手順 1c（ベースブランチに / を含む）')
+  assert.ok(collected.recorded.some((c) => / worktree-exclude\.sh$/.test(c)), 'コミットの前の一時ファイルの除外設定（引数なし）')
+  // 起動時のハッシュ予検査（--verify-only のヒアドキュメントに全スクリプト名が並ぶ）は除き、起動するコマンドだけを見る
+  for (const c of collected.recorded.filter((x) => / pr-body-edit\.sh | worktree-exclude\.sh$/.test(x) && !x.includes('--verify-only'))) {
     assert.doesNotMatch(c.replace(/^bash '[^']+'/, ''), /["'{}]/, `引数に引用符・{} を含めない: ${c}`)
   }
 })
 
-test('範囲 B（merge-exec の G0 とマージの実行）を g0-check.sh と単独の gh pr merge へ移したコマンドが組み立てられている', () => {
-  const all = collected.recorded.join('\n')
-  assert.ok(collected.recorded.some((c) => c.endsWith(' g0-check.sh main <HEAD sha>')), '外部チェックなし確定は slug:context の引数なし')
-  assert.ok(all.includes(' g0-check.sh release%2Fv1.2 <HEAD sha> cursor:Cursor%20Bugbot'), 'ベースブランチは URL エンコード、context は %XX エンコード')
-  assert.ok(all.includes(' g0-check.sh main <HEAD sha> cursor:Cursor%20Bugbot sonarcloud:SonarCloud%20Code%20Analysis'), '複数 App は宣言の順に App ごと')
-  assert.ok(collected.recorded.includes('gh pr merge 1005 --squash --delete-branch --match-head-commit <HEAD sha>'), '手順 5 は sha を値で埋め込む単独のコマンド')
-  // マージは変数の代入・連結なしの 1 本だけ
+test('merge-exec のマージは変数の代入・引用符・連結なしの単独の gh pr merge 1 本', () => {
+  assert.ok(collected.recorded.includes('gh pr merge 1005 --squash --delete-branch --match-head-commit <HEAD sha>'), 'sha を値で埋め込む単独のコマンド')
   for (const c of collected.recorded.filter((x) => x.includes('gh pr merge'))) {
     assert.match(c, /^gh pr merge \d+ --squash --delete-branch --match-head-commit <HEAD sha>$/)
   }
 })
 
-test('範囲 D で同梱スクリプト・単独のコマンドへ移した箇所が、マトリクスで実際に組み立てられている', () => {
-  const all = collected.recorded.join('\n')
-  for (const part of [
-    " worktree-cleanup.sh remove '/repo/wt/5'", // state:cleanup（パスは単一引用符で包む）
-    " worktree-cleanup.sh remove '/repo/wt 5'", // 半角スペースを含むパス
-    ' worktree-cleanup.sh delete-branch feat/5-x', // Recover の破棄のブランチ削除
-    ' worktree-cleanup.sh sweep _/issue-trees/', // ラン末尾のスイープ（候補一覧は Write ツールのファイル）
-    " discard-safety.sh '/repo/wt/5' feat/5-x main", // 破棄前の観測
-    ' discard-safety.sh - - main', // パス・ブランチが無いときは -
-    ' fetch-tree.sh 5', // closePrompt の子孫の再帰取得
-  ]) {
-    assert.ok(all.includes(part), `${part.trim()} を起動するコマンドが組み立てられていない`)
+// 利用側の Claude Code は、brace（{}・${}）と引用符が同じコマンド文字列に同居すると「展開による難読化」として
+// 毎回確認を出す（Workflow の agent は答えられず止まる）。ヒアドキュメントの本文もコマンド文字列の一部として数える。
+// 目印を付けたコマンドの全文（ヒアドキュメントの本文を含む）にこの同居が無いことを確かめる。
+// 例外は、外部チェックの宣言（JSON）を merge-gate.sh へ単一引用符で渡す形だけ（外部チェックを宣言したランに限る）。
+const BRACE_QUOTE_EXCEPTIONS = [
+  {
+    where: 'mergeGateCommand（外部チェックを宣言したランの --external）',
+    match: / merge-gate\.sh --nonce \S+ --pr \d+ --base \S+(?: --expect-sha [0-9a-f]{40})? --external '\[\{"app":/,
+    reason: 'upstream の merge-gate.sh は宣言を JSON 1 つで受け、封筒の inputSha256 がその文字列を束縛する。externalChecks: [] のランでは付かない',
+  },
+]
+function hasBraceAndQuote(c) {
+  return /[{}]/.test(c) && /['"]/.test(c)
+}
+
+test('目印を付けたコマンドは、brace と引用符を同じコマンド文字列に含まない（ヒアドキュメントの本文を含む）', () => {
+  const bad = [...new Set(collected.recorded)].filter((c) => hasBraceAndQuote(c) && !BRACE_QUOTE_EXCEPTIONS.some((e) => e.match.test(c)))
+  assert.deepEqual(bad, [])
+  for (const e of BRACE_QUOTE_EXCEPTIONS) {
+    assert.ok(collected.recorded.some((c) => hasBraceAndQuote(c) && e.match.test(c)), `${e.where}: 例外がもう当たらない（一覧から消す）`)
   }
-  for (const c of [
-    'git -C "/repo/wt/5" add -A',
-    'git -C "/repo/wt/5" commit -m "wip(recover): 中断時の未コミット変更を退避"',
-    'gh issue comment 5 --body-file <そのファイルの絶対パス>',
-    'gh issue close 5',
-  ]) {
-    assert.ok(collected.recorded.includes(c), `単独のコマンドにした ${c}`)
+})
+
+// ヒアドキュメントで標準入力に渡しているコマンド。本文に brace を含まない（上のテストが見る）ものだけが残る。
+// 一覧に無いヒアドキュメントが増えたら失敗にし、増やす PR で理由を書く。
+const HEREDOC_ALLOWED = [
+  { where: 'precheckScriptHashes（--verify-only の表）', match: /run-verified\.sh' --verify-only --nonce \S+ <<'HASHESEOF_/, reason: '表は「sha256 スクリプト名」の行だけ（brace・引用符を含まない）' },
+  { where: 'measureResidualBytesOnce（測るパスの一覧）', match: / measure-residual-bytes\.sh --nonce \S+ <<'PATHSEOF_/, reason: 'パスは sanitizeWorktreePath を通した英数字・/・-・_・.・空白だけ' },
+  { where: 'sweepClosedWorktrees（削除候補のパスの JSON 配列）', match: / worktree-remove\.sh sweep --file \S+ <<'SWEEP_EOF_/, reason: '文字列の配列で brace を含まない（パスは sanitizeWorktreePath を通した値）' },
+]
+
+test('目印を付けたコマンドのヒアドキュメントは、許可した 3 箇所（本文に brace を含まない）だけ', () => {
+  const heredocs = [...new Set(collected.recorded)].filter((c) => /<<-?'/.test(c))
+  const unexplained = heredocs.filter((c) => !HEREDOC_ALLOWED.some((e) => e.match.test(c)))
+  assert.deepEqual(unexplained, [])
+  for (const e of HEREDOC_ALLOWED) {
+    assert.ok(heredocs.some((c) => e.match.test(c)), `${e.where}: 例外がもう当たらない（一覧から消す）`)
   }
 })
 
 // --- 静的な走査 ---
 
-// まだ直していない範囲の既知の例外（Issue #11）。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に、
-// 範囲 C〔PR 本文・コメント・resolve の書き込み〕は pr-body-edit.sh・optin-record-count.sh・pr-comment.sh・resolve-thread.sh に、
-// 範囲 D〔削除と終了時の処理〕は worktree-cleanup.sh・discard-safety.sh に移したので、一覧は空。新しい例外は足さない
+// 既知の例外（Issue #11）。merge-exec の G0 は merge-gate.sh、マージは単独の gh pr merge、PR 本文・コメントの書き込みは
+// pr-body-edit.sh・optin-record-count.sh・pr-comment.sh、削除と終了時の処理は worktree-remove.sh に移したので、一覧は空。
+// resolve の mutation は gh api graphql の 1 コマンドのまま（scripts/ の静的ガードが mutation のスクリプト化を禁じる。
+// (a)〜(d) のどれにも当たらない）。新しい例外は足さない
 // （足すときは range・where・rules・match・reason を持たせる。match は検出した断片〔extractCommandCandidates の 1 行の
 // 切り出し、または extractCommandBlocks の複数行の塊〕に当てる正規表現）
 const KNOWN_EXCEPTIONS = []
 
 // コマンドではない文、または agent に実行させない例（やってはいけない例の説明など）
-const ALLOWED_TEXT = [
-  {
-    where: 'prCreatePrompt 手順 1b・postPushChecksInstruction などの説明文',
-    rules: ['b'],
-    match: /^head (?:branch|sha)$/,
-    reason: '英語の「head branch」「head sha」という語で、head コマンドではない',
-  },
-]
+// （upstream で PR 作成・push 後の確認が pr-push.sh・observe-pr.sh に移り、「head branch」「head sha」の説明文は消えた）
+const ALLOWED_TEXT = []
 
 const violations = []
 for (const text of new Set(collected.texts)) {

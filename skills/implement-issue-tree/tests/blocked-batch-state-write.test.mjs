@@ -16,10 +16,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
+import { hashPrecheckReply } from './lib/signed-output.mjs'
 import { requestedNumbers, STUB_SKILL_DIR, stateLoadOut } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
@@ -35,8 +37,8 @@ if (markerIndex < 0) throw new Error(`テスト境界マーカー ${DRIVER_MARKE
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
 
-globalThis.args = { parent: 1 }
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-blocked-batch-'))
+globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-blocked-batch-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-blocked-batch-defs.mjs')
 // 旧実装（修正前）にはこれらの宣言が無い。RED 確認用に typeof ガードで存在しない名前を undefined にする。
 const SLICE_EXPORTS = [
@@ -188,21 +190,23 @@ test('writeBlockedStateBatch: 同一 patch は numbers へ束ね、PR を持つ�
   assert.equal('pr' in groups[1].patch, false, '保存済み pr を消さない')
 })
 
-test('writeBlockedStateBatch: プロンプトは未信頼範囲の境界・TEMP_FILE_POLICY を含み、JSON はコマンド行に載せず Write ツールの patch ファイルと state-write.sh merge-groups で渡す', async () => {
+test('writeBlockedStateBatch: プロンプトは JSON を Write ツールで入力ファイルへ書かせ、state.sh を照合値付きで起動する（ヒアドキュメント・jq の手順を書かない）', async () => {
   const { calls } = installAgentStub(() => ({ ok: true }))
   await writeBlockedStateBatch(entriesOf(1, 2, BLOCKED), {})
   const p = calls[0].prompt
-  const nonce = /UNTRUSTED_([0-9a-z]+)_BEGIN/.exec(p)[1]
-  assert.match(p, /UNTRUSTED_[0-9a-z]+_END/)
+  assert.match(p, /非信頼データの取り扱い規則/)
   assert.match(p, /一時ファイル配置規則/)
-  const json = p.split('\n').find((l) => l.startsWith('[{"numbers"'))
-  // コマンドは 1 行で、patch の SHA-256（ホストが渡した JSON 1 行の値）と nonce を引数に持つ
-  const cmd = p.split('\n').find((l) => l.includes('state-write.sh merge-groups'))
-  // 照合値は nonce と束縛先（groups）を含む（state-write.sh と同じ定義）
-  assert.ok(cmd.endsWith(`state-write.sh merge-groups _/issue-trees/1.json ${nonce} ${sha256Hex(`${nonce}\ngroups\n${json}`)}`), cmd)
-  assert.ok(p.includes(`Write ツールで、カレントディレクトリ（メイン worktree）の _/issue-trees/1.json.patch-${nonce}.json に`))
-  // HEREDOC・mktemp・jq をエージェントに組み立てさせない
-  assert.doesNotMatch(p, /<<'|\$\(mktemp|jq --slurpfile/)
+  const m = /run-verified\.sh' @@SCRIPT_SHA256:state\.sh@@ state\.sh --file _\/issue-trees\/1\.json merge --input-nonce ([0-9a-z]+) --input-sha ([0-9a-f]{64})\n/.exec(p)
+  assert.ok(m, p)
+  const [, nonce, sha] = m
+  const data = p.split('\n').find((l) => l.startsWith('[{"numbers":[1,2],"patch":{'))
+  assert.ok(data)
+  // 照合値は nonce・モード・JSON に束縛される（state.sh の --input-sha と同じ定義）
+  assert.equal(sha, sha256Hex(`${nonce}\nmerge\n${data}`))
+  assert.ok(p.includes(`Write ツールで、カレントディレクトリ（メイン worktree）の _/issue-trees/1.json.input-${nonce}.json に`))
+  // JSON は境界の内側にだけ置き、nonce を含めない（境界の偽装を防ぐ）
+  assert.equal(data.includes(nonce), false)
+  assert.doesNotMatch(p, /<<'|jq --|slurpfile|mv "\$tmp"/)
 })
 
 test('writeBlockedStateBatch: haiku が未返却なら同一プロンプトで sonnet へ 1 回フォールバックする（#493 の対象に含まれる）', async () => {
@@ -331,6 +335,7 @@ async function runScript({ args, nodes, saved = null, ootStates = { [OOT]: 'OPEN
   const handler = (prompt, opts) => {
     const label = opts.label
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
+    if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') {
       return stateLoadOut(prompt, saved)

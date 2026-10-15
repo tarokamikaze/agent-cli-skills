@@ -57,8 +57,21 @@ export function signedReply(prompt, payload) {
   const nonce = nonceOf(prompt)
   if (nonce === null) throw new Error('プロンプトに --nonce <nonce> のコマンドが無い')
   const input = commandInputOf(prompt)
-  const full = input !== null && !('inputSha256' in payload) ? { ...payload, inputSha256: inputSha256(input) } : payload
+  let full = input !== null && !('inputSha256' in payload) ? { ...payload, inputSha256: inputSha256(input) } : payload
+  // 残置バイト測定の正直なスクリプトは dup（同じ実体の別の綴りとして測らなかった行数）を必ず出す。重複を伴わない
+  // 既存のスタブは 0 を補う。dup が欠けた・不整合な封筒を試すテストは、これを通さず makeEnvelope で直接作る
+  if ('kib' in full && 'missing' in full && 'count' in full && !('dup' in full)) full = { ...full, dup: 0 }
   return makeEnvelope(nonce, full)
+}
+
+// 起動時のハッシュ予検査（label: script-hash-precheck）への正直な応答。プロンプトのヒアドキュメントから表を取り出し、
+// 全行が実ファイルと一致したとき（既定）の封筒を返す。overrides でカウントを差し替えて版ずれ・欠落を模せる
+export function hashPrecheckReply(prompt, overrides = {}) {
+  const nonce = nonceOf(prompt)
+  const m = /<<'(HASHESEOF_[0-9a-z]+)'\n([\s\S]*?)\n\1\n/.exec(String(prompt))
+  if (nonce === null || !m) throw new Error('プロンプトに --verify-only のコマンドが無い')
+  const count = m[2].split('\n').length
+  return makeEnvelope(nonce, { count, firstBad: 0, inputSha256: inputSha256(m[2]), mismatch: 0, missing: 0, ok: count, ...overrides })
 }
 
 export function wrapAgentReply(prompt, value) {

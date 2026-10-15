@@ -13,12 +13,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
-import { signedReply } from './lib/signed-output.mjs'
-import { requestedNumbers, STUB_SKILL_DIR, stateLoadOut } from './lib/stub-run.mjs'
+import { hashPrecheckReply, signedReply } from './lib/signed-output.mjs'
+import { requestedNumbers, stateLoadOut } from './lib/stub-run.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
@@ -30,7 +31,7 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 const driverPart = source.slice(markerIndex)
 
 globalThis.args = { parent: 1 }
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-agent-budget-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-agent-budget-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-agent-budget-defs.mjs')
 // 旧実装（修正前）にはこれらの宣言が無い。RED 確認用に typeof ガードで存在しない名前を undefined にする。
 const SLICE_EXPORTS = [
@@ -172,6 +173,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     if (overridden !== undefined) return overridden
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
+    if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') return stateLoadOut(prompt, saved)
     if (label === 'state:load-verify') return saved === null ? { headerLines: 'NOFILE', hashes: {} } : stateVerifyFor(saved, 2)
@@ -209,7 +211,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
   return { result, calls, logs, peak }
 }
 
-const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
+const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: '/opt/skills/implement-issue-tree' }
 const LEAVES = [2, 3, 4, 5, 6, 7, 8, 9]
 
 test('結合: 上限が十分大きければ従来どおり全件に着手し、予算による停止は起きない', async () => {

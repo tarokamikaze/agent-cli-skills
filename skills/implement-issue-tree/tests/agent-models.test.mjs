@@ -116,6 +116,23 @@ test('結合: 指定した段階だけが変わり、機械的な agent のモ�
   assert.deepEqual(mech(calls), mech(base.calls))
 })
 
+test('結合: 7 段階すべてに既定と異なるモデルを入れても、機械的な agent（monitor を含む）のモデルは未指定のランと同じ', async () => {
+  // どの段階を指定しても monitor / merge-exec 等のモデルが引きずられないこと。monitor に stageModelOpt('review', …)
+  // のような誤配線をすると、review に既定と異なる値を入れたこのランで値が変わって落ちる。
+  const stages = { plan: 'fable', implement: 'opus', review: 'haiku', securityReview: 'fable', fix: 'opus', prCreate: 'haiku', baseMerge: 'opus' }
+  assert.deepEqual(Object.keys(stages), AGENT_MODEL_STAGES, '7 段階すべてを網羅している')
+  const judgment = /^(plan|impl|review|security-review|fix|pr-create|base-merge):#/
+  const mech = (cs) => cs.filter((c) => !judgment.test(c.opts.label)).map((c) => [c.opts.label, Object.prototype.hasOwnProperty.call(c.opts, 'model') ? c.opts.model : '(なし)'])
+  const run = (extra) => runScript({ args: { ...BASE_ARGS, securityReview: true, ...extra }, override: reviewNeedsFixOnce() })
+  const base = await run({})
+  const changed = await run({ models: stages })
+  assert.ok(mech(base.calls).some(([l]) => l.startsWith('merge:#')), 'monitor（merge:#）が比較対象に入っている')
+  assert.deepEqual(mech(changed.calls), mech(base.calls))
+  // 判断を伴う段階は指定どおりに変わっている（比較が空振りしていない）。
+  const m = modelsByLabel(changed.calls)
+  assert.deepEqual([m.get('plan:#'), m.get('impl:#'), m.get('review:#')[0], m.get('security-review:#')[0], m.get('fix:#'), m.get('pr-create:#')], [['fable'], ['opus'], 'haiku', 'fable', ['opus'], ['haiku']])
+})
+
 test('結合: すべての段階を指定しても、呼び出しの順序と数は未指定のランと同じ（モデル以外は変えない）', async () => {
   const base = await runScript({ args: BASE_ARGS, override: reviewNeedsFixOnce() })
   // securityReview はセキュリティ専用の Review を有効にしたときだけ指定できる（security-review.test.mjs）。
@@ -143,6 +160,26 @@ test('駆動部: 判断を伴う agent の呼び出しはすべて stageModelOpt
     assert.equal((driverPart.match(hard) ?? []).length, 0, `${label} に model の直書きが残っていない`)
   }
   assert.match(driverPart, /label: `plan:#\$\{item\.number\}`,\s*phase: 'Plan',\s*\.\.\.stageModelOpt\('plan'\),/, 'plan は既定なし（セッション継承）で stageModelOpt を使う')
+})
+
+test('結合: base 取り込みは既定で sonnet、models.baseMerge で変えられ、プロンプト（スクリプトの起動コマンド）と他の opts は変わらない', async () => {
+  // #603 第 3 弾以降の base 取り込みは scripts/base-merge.sh を 1 回実行して結果を転記するだけの agent で、
+  // 判断はスクリプトが行う。それでも models.baseMerge はモデルだけを変える（費用を下げる用途で残す）。
+  const conflicting = (label) => (label.startsWith('merge:#')
+    ? { state: 'conflicting', summary: 'mergeable: CONFLICTING', headSha: 'a'.repeat(40), unresolvedComments: [] }
+    : undefined)
+  const args = { ...BASE_ARGS, repo: 'Fandhe-AI/agent-cli-skills' }
+  const base = await runScript({ args, override: conflicting })
+  const low = await runScript({ args: { ...args, models: { baseMerge: 'haiku' } }, override: conflicting })
+  const pick = (r) => r.calls.filter((c) => c.opts.label.startsWith('base-merge:#'))
+  assert.equal(pick(base).length, 1)
+  assert.equal(pick(base)[0].opts.model, 'sonnet')
+  assert.equal(pick(low).length, 1)
+  assert.equal(pick(low)[0].opts.model, 'haiku')
+  assert.equal(pick(low)[0].prompt, pick(base)[0].prompt, 'モデルを変えてもプロンプトは同一')
+  const { model: _a, ...baseRest } = pick(base)[0].opts
+  const { model: _b, ...lowRest } = pick(low)[0].opts
+  assert.deepEqual(lowRest, baseRest)
 })
 
 // ---------------------------------------------------------------------------

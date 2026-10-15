@@ -16,6 +16,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -35,7 +36,7 @@ const driverPart = source.slice(markerIndex)
 
 globalThis.args = { parent: 1 }
 
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-state-verify-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-state-verify-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-state-verify-defs.mjs')
 const SLICE_EXPORTS = [
   'sha256Hex',
@@ -122,6 +123,28 @@ test('canonicalJson はキー昇順・空白なし・DEL を \\u007f へエス�
   const jqOut = '{"n":[1,-2,0,123456789],"o":{"a":{"c":{},"d":[]},"b":1},"s":"a\\u007fb\\u0001\\u001f\\t\\n\\\\\\" é😀/<>&","t":true,"z":null,"キー":"値"}'
   assert.equal(canonicalJson(v), jqOut)
   assert.equal(sha256Hex(canonicalJson(v)), 'e145292f5956db2bc57183b563ea1fc2d14fed1cb5f16f5a1a6eefc68a7e6c2f')
+})
+
+// closedCleanupTried（Issue #632）は項目の中の入れ子オブジェクト。読込スキーマは項目の値を制約せず（additionalProperties: true）、
+// 照合は項目全体を再帰的にキー整列して hash するため、入れ子のキー順が読込側と検証側で違っても一致する（既存挙動の固定）。
+// 期待値は jq 1.8.1 で `echo '<項目>' | jq -jcS . | shasum -a 256` を実行した値。
+const TRIED_ITEM_HASH = '2b5527904fa6d3005874418620ed534f903315c9398a6f3bb46ab16d4462829d'
+const triedItem = (order) => (order === 'asc'
+  ? { branch: 'feat/9-x', closedCleanupTried: { pr: 9, reason: 'retained', worktree: '/r/wt/a' }, pr: 9, status: 'blocked', worktree: '/r/wt/a' }
+  : { status: 'blocked', pr: 9, branch: 'feat/9-x', worktree: '/r/wt/a', closedCleanupTried: { worktree: '/r/wt/a', reason: 'retained', pr: 9 } })
+
+test('closedCleanupTried を持つ項目: 入れ子のキー順に依らず jq -jcS と同じ hash になり、読込・照合で採用される', () => {
+  for (const order of ['asc', 'file']) {
+    assert.equal(sha256Hex(canonicalJson(triedItem(order))), TRIED_ITEM_HASH, order)
+    const r = verifyLoadedItems({ 9: triedItem(order) }, { fileExists: true, hashes: { 9: TRIED_ITEM_HASH } })
+    assert.equal(r.verified, true, order)
+    assert.deepEqual(r.adopted[9].closedCleanupTried, { pr: 9, reason: 'retained', worktree: '/r/wt/a' })
+  }
+  // 読込側が入れ子を落とした項目は hash が合わず採用しない（記録が黙って消えない）
+  const { closedCleanupTried: _dropped, ...stripped } = triedItem('file')
+  const r = verifyLoadedItems({ 9: stripped }, { fileExists: true, hashes: { 9: TRIED_ITEM_HASH } })
+  assert.equal(r.verified, false)
+  assert.deepEqual(r.unverified, ['9'])
 })
 
 test('verifyLoadedItems: 実ファイルと同一の items は全件採用し verified: true', () => {
@@ -256,8 +279,9 @@ function installAgentStub(behavior) {
 // 読込エージェントの返却（state-read.sh summary の行をそのまま写した summaryLine と items）。数値の分解はホストが行う。
 const loadResult = (items, { highWaterBytes = 0, highWaterVersion = 0, count = Object.keys(items ?? {}).length } = {}) =>
   ({ summaryLine: `OK count=${count} bytes=${highWaterBytes} version=${highWaterVersion}`, createLine: '', items })
-// ファイルが無く、読込エージェントが state-write.sh create で新規作成した（create の出力は OK）。
-const CREATED_LOAD = { summaryLine: 'NOFILE', createLine: 'OK', items: {} }
+// ファイルが無く、読込エージェントが state.sh create で新規作成した（create の出力は STATE_RESULT {"ok":true}）。
+const CREATED_LINE = 'STATE_RESULT {"ok":true}'
+const CREATED_LOAD = { summaryLine: 'NOFILE', createLine: CREATED_LINE, items: {} }
 
 test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unverified として返す（throw しない）', async () => {
   const fabricated = Object.fromEntries(Object.entries(sampleItems).map(([k, v]) => [k, { ...v, pr: Number(k) + 1006 }]))
@@ -299,6 +323,18 @@ test('loadState: 実ファイルと一致する items は採用し、高水位�
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
       : verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 1 }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
+})
+
+test('loadState: closedCleanupTried を持つ項目（読込側が入れ子のキー順を変えて返す）も採用し verified: true', async () => {
+  const hashes = { 9: TRIED_ITEM_HASH }
+  installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? loadResult({ 9: triedItem('file') })
+      : verifyOut(hashes))
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.deepEqual(r.unverified, [])
+  assert.deepEqual(r.items[9].closedCleanupTried, { pr: 9, reason: 'retained', worktree: '/r/wt/a' })
 })
 
 test('loadState: 既存ファイルの照合が成立しない（検証が haiku / sonnet とも未返却）ならランを停止する', async () => {
@@ -462,7 +498,8 @@ test('検証プロンプトは項目ごとの jq -jcS ハッシュを要求し�
   assert.match(calls[0].prompt, /ホストが再取得/)
   // summary・create の出力行は加工せずに summaryLine・createLine へ写させ、数値の分解をさせない（Issue #23 と同じ方式）
   assert.match(calls[0].prompt, /出力の行を 1 文字も変えずにそのまま summaryLine へ写す/)
-  assert.match(calls[0].prompt, /標準出力をそのまま createLine へ写す/)
+  assert.match(calls[0].prompt, /標準出力（STATE_RESULT で始まる行）を 1 文字も変えずにそのまま createLine へ写す/)
+  assert.match(calls[0].prompt, /state\.sh --file _\/issue-trees\/1\.json create --base \S+ --parallel \d+ --version \d+/)
   assert.match(calls[0].prompt, /count= の値を <件数> として/)
   assert.doesNotMatch(calls[0].prompt, /highWaterBytes|highWaterVersion|fileExisted|ok: true|OK <件数>/)
 })
@@ -476,8 +513,11 @@ test('mergeVerifyPrompt は headRefName・baseRefName・closingIssuesReferences 
 
 test('monitorPrompt 手順 1 は PR 照合不一致で MERGED でも ready にせず blocked / unbound を返させる', () => {
   const p = monitorPrompt({ number: 365 }, { prNumber: 1366, branch: 'feat/365-bar' }, [], true, false)
-  const step1 = p.slice(p.indexOf('1. まず gh pr view'), p.indexOf('\n', p.indexOf('1. まず gh pr view')))
-  assert.ok(step1.includes('--json state,headRefOid,mergeable,headRefName,baseRefName,closingIssuesReferences,isCrossRepository'))
+  // #603 第 2 弾: 手順 1 の gh pr view は observe-pr.sh --mode pr へ移った（取得項目 headRefName・baseRefName・
+  // closingIssuesReferences・isCrossRepository の照合は observe-pr.test.mjs の 'pr:' テスト群が bound として固定する）
+  const step1 = p.slice(p.indexOf('\n1. ') + 1, p.indexOf('\n1c. '))
+  assert.match(step1, /observe-pr\.sh --nonce \S+ --mode pr --pr 1366 --base main --branch feat\/365-bar --issue 365/)
+  assert.ok(step1.includes('bound が 0'))
   assert.ok(step1.includes('baseRefName が "main" でない'))
   assert.ok(step1.includes('"feat/365-bar" と完全一致しない'))
   assert.ok(step1.includes('#365 を含まない'))
@@ -660,7 +700,7 @@ test('駆動部: stopUnverified と dispatch 前の state-unverified は同じ�
 
 test('駆動部: merged 受理（already-merged を含む）は PR 照合を要求し、opt-in 前の MERGED 確認も照合する', () => {
   assert.match(driverPart, /const verifyBindIssue = prBindingProblem\(item\.number, impl\.branch, v\)/)
-  assert.match(driverPart, /if \(!\(verifyStateOk && verifyHeadOk && !verifyBindIssue\)\) \{/)
+  assert.match(driverPart, /if \(!\(verifyStateOk && verifyHeadOk && !verifyBindIssue && gateCheck\.ok\)\) \{/)
 })
 
 test('駆動部: opt-in 前の MERGED 確認で PR 照合が不一致なら state を問わず blocked で終端する（allowMerge へ fail-open しない）', () => {
@@ -887,21 +927,21 @@ test('loadState: 高水位の行が読込側と食い違えば（version 0 な�
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
-// state-read.sh summary の行（と NOFILE のときの state-write.sh create の出力）の分解。読込エージェントにも
+// state-read.sh summary の行（と NOFILE のときの state.sh create の出力）の分解。読込エージェントにも
 // 位置で数値を分解させず、行を加工せずに返させてホストが分解する（Issue #23 と同じ取り違えを防ぐ）。
-test('parseStateLoadSummary: 新規ツリー（NOFILE → create が OK）・既存ファイル・PARSE_ERROR・create 失敗・dryRun を分解する', () => {
+test('parseStateLoadSummary: 新規ツリー（NOFILE → create が STATE_RESULT ok）・既存ファイル・PARSE_ERROR・create 失敗・dryRun を分解する', () => {
   const base = { count: 0, highWaterBytes: 0, highWaterVersion: 0 }
-  assert.deepEqual(parseStateLoadSummary('NOFILE', 'OK', false), { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION })
+  assert.deepEqual(parseStateLoadSummary('NOFILE', CREATED_LINE, false), { ...base, ok: true, fileExisted: false, highWaterVersion: HIGH_WATER_SCHEMA_VERSION })
   assert.deepEqual(parseStateLoadSummary('OK count=0 bytes=0 version=2', '', false), { ...base, ok: true, fileExisted: true, highWaterVersion: 2 })
   assert.deepEqual(parseStateLoadSummary('OK count=12 bytes=4096 version=2', '', false), { ok: true, fileExisted: true, count: 12, highWaterBytes: 4096, highWaterVersion: 2 })
   assert.deepEqual(parseStateLoadSummary('PARSE_ERROR', '', false), { ...base, ok: false, fileExisted: true })
-  // create が OK 以外（失敗で何も出ない・FAILED を写した）は初期化失敗（ok: false）
-  for (const c of ['', 'FAILED: exists', 'ok']) {
+  // create の結果の行が ok: false（既にある・書けない）は初期化失敗（ok: false）
+  for (const c of ['STATE_RESULT {"ok":false,"reason":"already-exists"}', 'STATE_RESULT {"ok":false,"reason":"rewrite-failed"}']) {
     assert.deepEqual(parseStateLoadSummary('NOFILE', c, false), { ...base, ok: false, fileExisted: false }, JSON.stringify(c))
   }
   // dryRun（読み取り専用）は作らない。create の出力があれば形が合わない
   assert.deepEqual(parseStateLoadSummary('NOFILE', '', true), { ...base, ok: true, fileExisted: false })
-  assert.equal(parseStateLoadSummary('NOFILE', 'OK', true), null)
+  assert.equal(parseStateLoadSummary('NOFILE', CREATED_LINE, true), null)
 })
 
 test('parseStateLoadSummary: 前後の空白・改行（CRLF・空行）の揺れは同じ値に分解する', () => {
@@ -914,7 +954,7 @@ test('parseStateLoadSummary: 前後の空白・改行（CRLF・空行）の揺�
   ]) {
     assert.deepEqual(parseStateLoadSummary(s, ' \n', false), want, JSON.stringify(s))
   }
-  assert.equal(parseStateLoadSummary('\n NOFILE \r\n', '\nOK\r\n', false).highWaterVersion, HIGH_WATER_SCHEMA_VERSION)
+  assert.equal(parseStateLoadSummary('\n NOFILE \r\n', `\n${CREATED_LINE}\r\n`, false).highWaterVersion, HIGH_WATER_SCHEMA_VERSION)
 })
 
 test('parseStateLoadSummary: ラベル違い・数値でない・余分な行・欠けた行は分解せず null（形が合わない）', () => {
@@ -926,7 +966,7 @@ test('parseStateLoadSummary: ラベル違い・数値でない・余分な行・
     ['ok count=3 bytes=4096 version=2', ''],
     ['OK cnt=3 bytes=4096 version=2', ''],
     ['OK count:3 bytes:4096 version:2', ''],
-    ['NOFILES', 'OK'],
+    ['NOFILES', CREATED_LINE],
     ['PARSE ERROR', ''],
     // 数値でない・負・小数・先頭のゼロ・桁あふれ・欠落
     ['OK count=x bytes=4096 version=2', ''],
@@ -940,11 +980,11 @@ test('parseStateLoadSummary: ラベル違い・数値でない・余分な行・
     // 余分な行
     ['OK count=3 bytes=4096 version=2\nOK count=3 bytes=4096 version=2', ''],
     ['OK count=3 bytes=4096 version=2\nNOFILE', ''],
-    ['NOFILE\nOK', 'OK'],
-    ['NOFILE', 'OK\nOK'],
+    ['NOFILE\nOK', CREATED_LINE],
+    ['NOFILE', `${CREATED_LINE}\n${CREATED_LINE}`],
     // ファイルがあるのに create の出力がある（読込エージェントが既存ファイルで create を走らせた・別の出力を写した）
-    ['OK count=3 bytes=4096 version=2', 'OK'],
-    ['PARSE_ERROR', 'OK'],
+    ['OK count=3 bytes=4096 version=2', CREATED_LINE],
+    ['PARSE_ERROR', CREATED_LINE],
   ]) {
     assert.equal(parseStateLoadSummary(s, c, false), null, JSON.stringify([s, c]))
   }
@@ -970,7 +1010,7 @@ test('isValidStateLoadResult: summaryLine・createLine の形と items の型を
 
 test('loadState: 新規ツリーで読込が summary・create の行をそのまま返せば、版 2 として照合が成立する（Issue #23 と同じ症状の再現）', async () => {
   installAgentStub((opts) =>
-    opts.label === 'state:load' ? { summaryLine: 'NOFILE', createLine: 'OK\n', items: {} } : verifyOut({}, { version: 2 }))
+    opts.label === 'state:load' ? { summaryLine: 'NOFILE', createLine: `${CREATED_LINE}\n`, items: {} } : verifyOut({}, { version: 2 }))
   const r = await loadState()
   assert.equal(r.verified, true)
   assert.equal(r.highWaterVersion, 2)
