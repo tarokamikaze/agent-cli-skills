@@ -146,14 +146,13 @@ function oldG0(g, bash, base, decl) {
   return end('pass')
 }
 
-// 旧手順の出力に、旧手順に無い (i-a) の行を挟む。(i) で終わった出力（classic-unsupported）には挟まない。値は旧プロンプトの
-// REQ（(v) の式）のうち空でない文字列の件数。1 以上のときだけ使う（0・取得不能の構成は旧手順と結果が変わるので DIVERGENT_CASES）
-const OLD_REQ_CONTEXTS = (base) => [...OLD.vHead(base), `printf '%s' "$REQ" | jq '[.[] | select(type == "string" and length > 0)] | length'`].join('\n')
-function withContextsLine(g, bash, base, oldOut) {
+// 旧手順の出力に、旧手順に無い (i-a) の行を挟む。(i) で終わった出力（classic-unsupported）には挟まない。値 n は各ケースの
+// fixture から数えた必須の context の件数を CASES に固定値で書いたもの（実装と同じ jq の式で求めると独立した検査にならないため）。
+// 1 以上のときだけ使う（0・取得不能の構成は旧手順と結果が変わるので DIVERGENT_CASES）
+function withContextsLine(oldOut, n) {
   const lines = oldOut.trimEnd().split('\n')
   if (/^required-status-check-rules (0|error)$/.test(lines[0])) return oldOut
-  const n = count(g.old(bash, OLD_REQ_CONTEXTS(base)))
-  assert.match(n, /^[1-9]\d*$/, 'このヘルパーは必須の context が 1 件以上の構成だけに使う')
+  assert.ok(Number.isInteger(n) && n >= 1, 'このヘルパーは必須の context が 1 件以上の構成だけに使う')
   return `${[lines[0], `required-status-check-contexts ${n}`, ...lines.slice(1)].join('\n')}\n`
 }
 
@@ -182,14 +181,15 @@ function passing() {
 }
 const DECL = [{ app: 'cursor', contexts: ['Cursor Bugbot'] }, { app: 'sonarcloud', contexts: ['SonarCloud Code Analysis'] }]
 
-// [名前, fixture を変える関数, 宣言, 期待する verdict, 期待する最後の判定行]
+// [名前, fixture を変える関数, 宣言, 期待する verdict, 期待する最後の判定行, (i-a) の必須の context の件数（省略時は passing() の
+// ci・Cursor Bugbot・SonarCloud Code Analysis の 3。(i) で終わるケースでは使わない）]
 const CASES = [
-  ['すべて合格', (f) => f, DECL, 'pass', 'required-contexts-without-bound-run 0'],
+  ['すべて合格', (f) => f, DECL, 'pass', 'required-contexts-without-bound-run 0', 3],
   ['宣言なし（外部チェックなし確定）でも (iv) は 0 件として通る', (f) => f, [], 'pass', 'required-contexts-without-bound-run 0'],
   ['(i) required_status_checks のルールが無い → classic-unsupported', (f) => ({ ...f, 'rules-main.pages.json': [[pr(true)]] }), DECL, 'classic-unsupported', 'required-status-check-rules 0'],
   ['(i) ルールの取得に失敗 → classic-unsupported', (f) => ({ ...f, 'err-rules-main': 'HTTP 502' }), DECL, 'classic-unsupported', 'required-status-check-rules error'],
   ['(i-b) Organization の ruleset → server-enforcement-missing', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([CI, BUGBOT]), pr(true)], [{ ...rsc([SONAR], 11), ruleset_source_type: 'Organization' }]] }), DECL, 'server-enforcement-missing', 'non-repository-rulesets 1'],
-  ['(i-b) ruleset_id が欠落 → server-enforcement-missing', (f) => ({ ...f, 'rules-main.pages.json': [[{ type: 'required_status_checks', ruleset_source_type: 'Repository', parameters: { required_status_checks: [CI] } }, pr(true)]] }), DECL, 'server-enforcement-missing', 'non-repository-rulesets 1'],
+  ['(i-b) ruleset_id が欠落 → server-enforcement-missing', (f) => ({ ...f, 'rules-main.pages.json': [[{ type: 'required_status_checks', ruleset_source_type: 'Repository', parameters: { required_status_checks: [CI] } }, pr(true)]] }), DECL, 'server-enforcement-missing', 'non-repository-rulesets 1', 1],
   ['(i-b) bypass_actors がある → server-enforcement-missing', (f) => ({ ...f, 'ruleset-11.json': { id: 11, bypass_actors: [{ actor_type: 'RepositoryRole' }] } }), DECL, 'server-enforcement-missing', 'rulesets-with-bypass 1'],
   ['(i-b) bypass_actors が null → server-enforcement-missing', (f) => ({ ...f, 'ruleset-10.json': { id: 10, bypass_actors: null } }), DECL, 'server-enforcement-missing', 'rulesets-with-bypass 1'],
   ['(i-b) ruleset の取得に失敗 → server-enforcement-missing', (f) => ({ ...f, 'err-ruleset-11': 'HTTP 403' }), DECL, 'server-enforcement-missing', 'rulesets-with-bypass error'],
@@ -198,7 +198,7 @@ const CASES = [
   ['(iv) App ごとの App ID を使う（cursor の ID を sonarcloud に流用すると不合格になる構成）', (f) => ({ ...f, 'app-sonarcloud.json': { id: 1001 } }), DECL, 'server-enforcement-missing', 'unbound-external-contexts 1'],
   ['(iv) App ID が数値でない → server-enforcement-missing', (f) => ({ ...f, 'app-cursor.json': { id: null } }), DECL, 'server-enforcement-missing', 'unbound-external-contexts error'],
   ['(iv) App ID の取得に失敗 → server-enforcement-missing', (f) => ({ ...f, 'err-app-sonarcloud': 'HTTP 404' }), DECL, 'server-enforcement-missing', 'unbound-external-contexts error'],
-  ['(iv) 引用符・{}・| ・非 ASCII を含む context も値で照合する', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([CI, ODD_CHECK]), pr(true)]], 'app-odd-app.json': { id: 3003 }, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('ci', 15368), checkRun(ODD, 3003)] }] }), [{ app: 'odd-app', contexts: [ODD] }], 'pass', 'required-contexts-without-bound-run 0'],
+  ['(iv) 引用符・{}・| ・非 ASCII を含む context も値で照合する', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([CI, ODD_CHECK]), pr(true)]], 'app-odd-app.json': { id: 3003 }, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('ci', 15368), checkRun(ODD, 3003)] }] }), [{ app: 'odd-app', contexts: [ODD] }], 'pass', 'required-contexts-without-bound-run 0', 2],
   ['(v) required に無い check-run → server-enforcement-missing', (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('ci', 15368), checkRun('Cursor Bugbot', 1001), checkRun('lint', 15368)] }, { check_runs: [checkRun('SonarCloud Code Analysis', 2002)] }] }), DECL, 'server-enforcement-missing', 'client-only-statuses 0'],
   ['(v) required に無い commit status → server-enforcement-missing', (f) => ({ ...f, [`statuses-${SHA}.json`]: [{ context: 'ci' }, { context: 'deploy/preview' }, { context: 'deploy/preview' }] }), DECL, 'server-enforcement-missing', 'client-only-statuses 1'],
   ['(v) check-run の取得に失敗 → server-enforcement-missing', (f) => ({ ...f, [`err-checks-${SHA}`]: 'HTTP 502' }), DECL, 'server-enforcement-missing', 'client-only-statuses 0'],
@@ -206,12 +206,12 @@ const CASES = [
   ['(v-b) integration_id が null の required check → issuer-unbound', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([{ context: 'ci', integration_id: null }, BUGBOT]), pr(true)], [rsc([SONAR], 11)]] }), DECL, 'issuer-unbound', 'required-contexts-without-bound-run 1'],
   ['(v-b) 同名の commit status だけで束縛済みの check-run が無い → checks-not-green', (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('Cursor Bugbot', 1001)] }, { check_runs: [checkRun('SonarCloud Code Analysis', 2002)] }] }), DECL, 'checks-not-green', 'required-contexts-without-bound-run 1'],
   ['(v-b) 同名の check-run が別の App から → checks-not-green', (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ check_runs: [checkRun('ci', 9999), checkRun('Cursor Bugbot', 1001)] }, { check_runs: [checkRun('SonarCloud Code Analysis', 2002)] }] }), DECL, 'checks-not-green', 'required-contexts-without-bound-run 1'],
-  ['(i-a) 空の required_status_checks のルールがあっても、ほかのルールに必須の context があれば通る', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([CI, BUGBOT]), rsc([], 12), pr(true)], [rsc([SONAR], 11)]], 'ruleset-12.json': { id: 12, bypass_actors: [] } }), DECL, 'pass', 'required-contexts-without-bound-run 0'],
+  ['(i-a) 空の required_status_checks のルールがあっても、ほかのルールに必須の context があれば通る', (f) => ({ ...f, 'rules-main.pages.json': [[rsc([CI, BUGBOT]), rsc([], 12), pr(true)], [rsc([SONAR], 11)]], 'ruleset-12.json': { id: 12, bypass_actors: [] } }), DECL, 'pass', 'required-contexts-without-bound-run 0', 3],
 ]
 
 // 旧手順と意図して結果を変えるケース（Issue #15）。旧手順の verdict（oldVerdict）は記録として検査し、スクリプトの出力は
 // want で固定する。(i-a) で終わるので、ruleset の bypass・HEAD の check-run / commit status は取得しない
-// [名前, fixture を変える関数, 旧手順の verdict, スクリプトの出力]
+// [名前, fixture を変える関数, 旧手順の verdict, スクリプトの出力, 宣言（省略時は宣言なし）]
 const EMPTY_HEAD = (f) => ({ ...f, [`checks-${SHA}.pages.json`]: [{ total_count: 0, check_runs: [] }], [`statuses-${SHA}.json`]: [] })
 const DIVERGENT_CASES = [
   [
@@ -244,16 +244,41 @@ const DIVERGENT_CASES = [
     'checks-not-green',
     'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
   ],
+  [
+    'required_status_checks が null（旧手順は (v) で辞退）→ (i-a) が jq のエラーで error、server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[{ ...rsc([]), parameters: { required_status_checks: null } }, pr(true)]] }),
+    'server-enforcement-missing',
+    'required-status-check-rules 1\nrequired-status-check-contexts error\nverdict server-enforcement-missing\n',
+  ],
+  [
+    'context が null だけ（旧手順は checks-not-green）→ 0 件として server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[rsc([{ context: null, integration_id: 15368 }]), pr(true)]] }),
+    'checks-not-green',
+    'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+  ],
+  [
+    'context も integration_id も null（旧手順は issuer-unbound）→ 0 件として server-enforcement-missing',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[rsc([{ context: null, integration_id: null }]), pr(true)]] }),
+    'issuer-unbound',
+    'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+  ],
+  [
+    '必須の context が 0 件で externalChecks の宣言あり（旧手順は (iv) で辞退）→ (iv) より前の (i-a) で止まり、App ID を取得しない',
+    (f) => ({ ...EMPTY_HEAD(f), 'rules-main.pages.json': [[rsc([]), pr(true)]] }),
+    'server-enforcement-missing',
+    'required-status-check-rules 1\nrequired-status-check-contexts 0\nverdict server-enforcement-missing\n',
+    DECL,
+  ],
 ]
 
 for (const bash of BASHES) {
   const tag = `[${bash}]`
 
-  for (const [name, mutate, decl, verdict, lastCheck] of CASES) {
+  for (const [name, mutate, decl, verdict, lastCheck, contexts = 3] of CASES) {
     test(`${tag} g0-check.sh: ${name}（旧コマンドを旧手順どおりに読んだ値・順序・reason と同じ。(i-a) の行を除く）`, () => {
       const g = setup(mutate(passing()))
       try {
-        const want = withContextsLine(g, bash, 'main', oldG0(g, bash, 'main', decl))
+        const want = withContextsLine(oldG0(g, bash, 'main', decl), contexts)
         const args = ['main', SHA, ...decl.flatMap((d) => d.contexts.map((c) => g0ContextArg(d.app, c)))]
         writeFileSync(join(g.dir, 'calls.log'), '')
         const r = g.run(bash, args)
@@ -275,14 +300,14 @@ for (const bash of BASHES) {
     })
   }
 
-  for (const [name, mutate, oldVerdict, want] of DIVERGENT_CASES) {
+  for (const [name, mutate, oldVerdict, want, decl = []] of DIVERGENT_CASES) {
     test(`${tag} g0-check.sh: ${name}（旧手順と意図して結果を変える）`, () => {
       const g = setup(mutate(passing()))
       try {
         // 旧手順の結果を記録として確かめる（このケースだけ旧手順との一致を求めない理由）
-        assert.equal(oldG0(g, bash, 'main', []).trimEnd().split('\n').at(-1), `verdict ${oldVerdict}`)
+        assert.equal(oldG0(g, bash, 'main', decl).trimEnd().split('\n').at(-1), `verdict ${oldVerdict}`)
         writeFileSync(join(g.dir, 'calls.log'), '')
-        const r = g.run(bash, ['main', SHA])
+        const r = g.run(bash, ['main', SHA, ...decl.flatMap((d) => d.contexts.map((c) => g0ContextArg(d.app, c)))])
         assert.equal(r.stdout, want, r.stderr)
         assert.equal(r.status, 1)
         const calls = g.calls()
