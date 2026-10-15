@@ -11,13 +11,16 @@
 #
 # 旧プロンプト（merge-exec の手順 2b (i)〜(v-b)）が agent に実行させていた、gh api の結果を jq へパイプする多段・
 # --jq の式（{} と | を含む）・HEAD_SHA / REQ / RSC / APP_ID_<SLUG> の代入と、それらを 1 回の Bash 実行でまとめて流す手順を、
-# スクリプトへ移したもの（Issue #11 の範囲 B）。各判定の jq の式は旧プロンプトと同じで、判定の順序も同じ。旧手順と同じく、
+# スクリプトへ移したもの（Issue #11 の範囲 B）。各判定の jq の式は旧プロンプトと同じで、判定の順序も同じ（例外は、あとから
+# (i) の直後に足した (i-a)。Issue #15）。旧手順と同じく、
 # 不合格（取得の失敗を含む）になった判定でそれより後の判定を行わずに終わる。違うのは、ルールの一覧（rules/branches）と
 # HEAD sha 上の check-run を 1 回ずつだけ取得して各判定で使い回すこと（旧手順は判定ごとに同じ API を取り直していた）。
 #
 # 出力（標準出力）: 判定ごとに「<判定名> <値>」の行を下の順で。値は件数（非負整数）か true / false、取得・計算に失敗したら
 # error。不合格の判定より後の行は出さない。最後に必ず「verdict <結果>」の 1 行を出す（使い方の誤りを除く）。
 #   required-status-check-rules <件数>            (i)    required_status_checks のルールの件数。1 以上で合格
+#   required-status-check-contexts <件数>         (i-a)  必須の context（重複なし・空でない文字列）の件数。1 以上で合格
+#                                                        （旧手順に無い判定。Issue #15）
 #   non-repository-rulesets <件数>                (i-b)  適用 ruleset のうち、id が数値でない・ソースが Repository でないもの。0 で合格
 #   rulesets-with-bypass <件数>                   (i-b)  bypass_actors が空の配列でない ruleset。0 で合格
 #   thread-resolution-required <true|false>       (iii)  pull_request ルールのどれかが required_review_thread_resolution。true で合格
@@ -29,7 +32,8 @@
 #   required-contexts-without-bound-run <件数>    (v-b)  宣言 integration_id と一致する App の check-run が HEAD 上に無い required context。0 で合格
 #   verdict <pass|classic-unsupported|server-enforcement-missing|issuer-unbound|checks-not-green>
 # verdict の決め方（旧プロンプトの判定と同じ）:
-#   (i) が 0 か error → classic-unsupported。(i-b)・(iii)・(iv)・(v) の不合格・error → server-enforcement-missing。
+#   (i) が 0 か error → classic-unsupported。(i-a)・(i-b)・(iii)・(iv)・(v) の不合格・error → server-enforcement-missing
+#   （(i-a) だけは旧手順に無く、必須の context が 0 件の構成では旧手順が pass にしうるところを辞退にする）。
 #   (v-b) の 1 つ目が 1 以上か error、または 2 つ目が error → issuer-unbound。1 つ目が 0 で 2 つ目だけ 1 以上 → checks-not-green
 #   （束縛済みの check-run が未発行。一過性の可能性）。すべて合格 → pass。
 # 終了コード:
@@ -104,6 +108,19 @@ fi
 emit required-status-check-rules "${v}"
 [ "${v}" != error ] && [ "${v}" -ge 1 ] || finish classic-unsupported
 
+# (i-a) 必須の context が 1 件以上あること（旧手順に無い判定。Issue #15）。ルールがあっても必須の context が 0 件なら、
+# サーバー側の強制は何も見ていない。旧手順は HEAD にチェックも commit status も無いと (v)・(v-b) が 0/0 になって pass に
+# していた。(i) と分けるのは、(i) の不合格は classic branch protection の経路（classic-unsupported）を意味し、こちらは
+# ruleset の経路でサーバー側の強制を確認できない（server-enforcement-missing）ため。ここで求めた REQ は (v) でも使う
+v=error
+req_ok=0
+if req=$(printf '%s' "${rules}" | gr_required_contexts_of_pages) && [ -n "${req}" ]; then
+  req_ok=1
+  c=$(printf '%s' "${req}" | jq '[.[] | select(type == "string" and length > 0)] | length') && is_count "${c}" && v=${c}
+fi
+emit required-status-check-contexts "${v}"
+[ "${v}" != error ] && [ "${v}" -ge 1 ] || finish server-enforcement-missing
+
 # (i-b) 適用 ruleset がすべて数値の id でリポジトリの ruleset であること（Organization から継承した ruleset は検証できない）
 v=error
 sources=$(printf '%s' "${rules}" | jq -c '[.[][] | {id: .ruleset_id, src: .ruleset_source_type}] | unique') &&
@@ -169,7 +186,7 @@ emit unbound-external-contexts "${v}"
 cr=error
 st=error
 runs_ok=0
-if req=$(printf '%s' "${rules}" | gr_required_contexts_of_pages) && [ -n "${req}" ]; then
+if [ "${req_ok}" = 1 ]; then
   if runs=$(gh api --paginate --slurp "repos/{owner}/{repo}/commits/${sha}/check-runs"); then
     runs_ok=1
     c=$(printf '%s' "${runs}" | jq --argjson req "${req}" '[.[].check_runs[].name | select(. as $n | ($req | index($n)) | not)] | length') &&
