@@ -3133,7 +3133,6 @@ function canonicalJson(v) {
 // 等の特殊キーで採用先オブジェクトを汚染しないため）。verified は「全項目が一致し、かつ検証が
 // 成立した」場合のみ true（ラン末尾の worktree 削除判定はこれが true のときだけ行う）。
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
-const isNonNegInt = (x) => Number.isInteger(x) && x >= 0
 
 function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes ? check.hashes : null
@@ -3159,18 +3158,39 @@ function verifyLoadedItems(items, check) {
   return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
-// state:load-verify の isValid（Bugbot 指摘）。fileExists だけの応答（例 { fileExists: true }）を
-// 受理すると sonnet へのフォールバックが走らず全項目不採用に落ちるため、state:load と同じく必須
-// フィールドの型をすべて検証する。hashes の値も 64 桁小文字 16 進のみ受理する（不正な応答は
-// フォールバックへ回し、それでも不成立なら呼び出し側が状態なしとして扱う）。
+// state-verify.sh の先頭の行（検証エージェントが加工せずに写した headerLines）をホストが分解する純粋関数
+// （Issue #23）。以前はエージェントに「2 行目の [<高水位>,<版>] を highWaterBytes・highWaterVersion へ」と
+// 位置で分解させており、haiku が [0,2] を 0・0 と取り違えて新規ツリーの初回ランが照合不成立で止まった。
+// 受理するのは「NOFILE」の 1 行か、「KEYS <64 桁 hex> <件数>」と「HIGHWATER bytes=<整数> version=<整数>」の
+// ちょうど 2 行だけ。各行の前後の空白・CRLF・空行・2 行の順序の揺れは許し、それ以外（ラベル違い・
+// 数値でない・先頭のゼロ・余分な行・欠けた行）は null（照合不成立。fail-closed）にする。
+function parseStateVerifyHeader(text) {
+  if (typeof text !== 'string') return null
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
+  if (lines.length === 1 && lines[0] === 'NOFILE') {
+    return { fileExists: false, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
+  }
+  const n = '(0|[1-9]\\d{0,14})'
+  const k = lines.map((l) => new RegExp(`^KEYS[ \\t]+([0-9a-f]{64})[ \\t]+${n}$`).exec(l))
+  const w = lines.map((l) => new RegExp(`^HIGHWATER[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(l))
+  const ki = k.findIndex(Boolean)
+  const wi = w.findIndex(Boolean)
+  if (lines.length !== 2 || ki < 0 || wi < 0 || ki === wi) return null
+  return { fileExists: true, keysSha256: k[ki][1], keysCount: Number(k[ki][2]), highWaterBytes: Number(w[wi][1]), highWaterVersion: Number(w[wi][2]) }
+}
+
+// state:load-verify の isValid（Bugbot 指摘）。不完全な応答を受理すると sonnet へのフォールバックが走らず
+// 全項目不採用に落ちるため、必須フィールドをすべて検証する。headerLines はホストが分解できる形に限り、
+// hashes の値も 64 桁小文字 16 進のみ受理する（不正な応答はフォールバックへ回し、それでも不成立なら
+// 呼び出し側が照合不成立として停止する）。
 function isValidStateVerifyResult(r) {
   const h = r?.hashes
+  const head = parseStateVerifyHeader(r?.headerLines)
   return (
-    typeof r?.fileExists === 'boolean' &&
+    head !== null &&
     h !== null && typeof h === 'object' && !Array.isArray(h) &&
     Object.values(h).every((x) => /^[0-9a-f]{64}$/.test(x)) &&
-    (r.fileExists ? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '' && r.keysCount === 0) &&
-    isNonNegInt(r.keysCount) && isNonNegInt(r.highWaterBytes) && isNonNegInt(r.highWaterVersion)
+    (head.fileExists || Object.keys(h).length === 0)
   )
 }
 
@@ -3183,14 +3203,10 @@ const isValidStateFillResult = (r) => r?.items !== null && typeof r?.items === '
 
 const STATE_VERIFY_SCHEMA = {
   type: 'object',
-  required: ['fileExists', 'hashes', 'keysSha256', 'keysCount', 'highWaterBytes', 'highWaterVersion'],
+  required: ['headerLines', 'hashes'],
   properties: {
-    fileExists: { type: 'boolean' },
+    headerLines: { type: 'string' },
     hashes: { type: 'object', additionalProperties: { type: 'string' } },
-    keysSha256: { type: 'string' },
-    keysCount: { type: 'integer', minimum: 0 },
-    highWaterBytes: { type: 'integer', minimum: 0 },
-    highWaterVersion: { type: 'integer', minimum: 0 },
   },
 }
 
@@ -3256,16 +3272,19 @@ async function loadState() {
   }
   // 内容照合（上の「状態ファイル読込の内容照合」節参照）。検証エージェントには読込結果を渡さない
   // （独立観測を崩さないため）。未返却（outputMissing）は全項目不採用＝状態なしに倒す。
-  const { result: check } = await runStateAgent(
+  // 検証エージェントには出力の先頭の行を加工せずに返させ、数値の分解はホスト（parseStateVerifyHeader）が
+  // 行う（Issue #23。位置で分解させると小さいモデルが取り違える）。
+  const { result: verifyRaw } = await runStateAgent(
     [
       TEMP_FILE_POLICY,
       STATE_SCRIPT_ONLY,
       `状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら、同じコマンドの末尾に行範囲を足して〔例: 1 20〕分割実行し全件を取得する）:`,
       scriptCommand('state-verify.sh', ` ${STATE_FILE}`),
-      `返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
+      `返却: NOFILE なら headerLines: "NOFILE"・hashes: {}。それ以外は headerLines へ、出力の KEYS で始まる行と HIGHWATER で始まる行を 1 文字も変えずにそのまま写す（2 行を改行でつなぐ。数値を取り出したり、並べ替えたり、計算し直したり、返すキー一覧から作ったりしない。分解と照合はホストが行う）。3 行目以降の「キー ハッシュ」行を hashes（キー → ハッシュ）。`,
     ].join('\n'),
     { label: 'state:load-verify', schema: STATE_VERIFY_SCHEMA, isValid: isValidStateVerifyResult },
   )
+  const check = verifyRaw && { ...parseStateVerifyHeader(verifyRaw.headerLines), hashes: verifyRaw.hashes }
   // 照合自体が成立しない（検証エージェントが haiku / sonnet とも不成立、または読込側が既存と
   // 申告したファイルを検証側が見つけられない）場合は停止する（Codex P1）。全項目を状態なしにして
   // 続行すると、既存の monitoring 状態・PR 番号を失ったまま再実装・PR 作成へ進み得るため。

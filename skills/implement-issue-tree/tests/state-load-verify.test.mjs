@@ -50,6 +50,7 @@ const SLICE_EXPORTS = [
   'mergeExecutePrompt',
   'checkPrBinding',
   'isValidStateVerifyResult',
+  'parseStateVerifyHeader',
   'applyPrereqTransitions',
   'normalizeBlockedReason',
   'MERGE_SCHEMA',
@@ -69,6 +70,7 @@ const {
   mergeExecutePrompt,
   checkPrBinding,
   isValidStateVerifyResult,
+  parseStateVerifyHeader,
   applyPrereqTransitions,
   normalizeBlockedReason,
   MERGE_SCHEMA,
@@ -78,6 +80,11 @@ const {
 const nodeSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
 // 検証側が返す keysSha256 の期待値（hashes のキー一覧の jq 正規形の sha256）。
 const keysOf = (hashes) => sha256Hex(canonicalJson(Object.keys(hashes).sort()))
+// 検証エージェントの返却（state-verify.sh の先頭 2 行をそのまま写した headerLines と、「キー ハッシュ」行の hashes）。
+// 数値の分解はホスト（parseStateVerifyHeader）が行う。
+const verifyOut = (hashes, { bytes = 0, version = 0, keysSha256 = keysOf(hashes), keysCount = Object.keys(hashes).length } = {}) =>
+  ({ headerLines: `KEYS ${keysSha256} ${keysCount}\nHIGHWATER bytes=${bytes} version=${version}`, hashes })
+const NOFILE_OUT = { headerLines: 'NOFILE', hashes: {} }
 
 // jq 1.8.1 で `jq -jcS --arg k "$k" '.items[$k]' sample/state-example.json | sha256sum` を実行した値。
 const SAMPLE_JQ_HASHES = {
@@ -247,7 +254,7 @@ test('loadState: 捏造 items（PR = issue + 1006）は採用せず state-unveri
   const { calls, logs } = installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(fabricated)
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 0, highWaterVersion: 0 })
+      : verifyOut(SAMPLE_JQ_HASHES))
   const r = await loadState()
   assert.deepEqual(r.items, {})
   assert.equal(r.verified, false)
@@ -264,7 +271,7 @@ test('loadState: 実ファイルと一致する items は採用し、高水位�
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 4096, highWaterVersion: 2 })
+      : verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 2 }))
   const r = await loadState()
   assert.deepEqual(Object.keys(r.items).sort(), ['42', '43', '44', '45'])
   assert.equal(r.verified, true)
@@ -274,13 +281,13 @@ test('loadState: 実ファイルと一致する items は採用し、高水位�
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 1, highWaterVersion: 2 })
+      : verifyOut(SAMPLE_JQ_HASHES, { bytes: 1, version: 2 }))
   // 高水位が両エージェントで食い違う場合は 0 へ置き換えて続行せず停止する（容量予約を失わない。Codex P1）
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: 4, highWaterBytes: 4096, highWaterVersion: 1 })
+      : verifyOut(SAMPLE_JQ_HASHES, { bytes: 4096, version: 1 }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
@@ -295,7 +302,7 @@ test('loadState: 既存ファイルの照合が成立しない（検証が haiku
 
 test('loadState: 読込側が既存と申告したファイルを検証側が見つけられない場合も停止する', async () => {
   installAgentStub((opts) =>
-    opts.label === 'state:load' ? loadResult(sampleItems) : { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 })
+    opts.label === 'state:load' ? loadResult(sampleItems) : NOFILE_OUT)
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
@@ -303,7 +310,7 @@ test('loadState: ファイルが無く新規作成した場合は検証が NOFIL
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
-      : { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 })
+      : NOFILE_OUT)
   const r = await loadState()
   assert.deepEqual(r.items, {})
   assert.deepEqual(r.unverified, [])
@@ -313,7 +320,7 @@ test('loadState: 新規作成（items: {}）は検証成立で verified: true', 
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
-      : { fileExists: true, hashes: {}, keysSha256: keysOf({}), keysCount: Object.keys({}).length, highWaterBytes: 0, highWaterVersion: 2 })
+      : verifyOut({}, { version: 2 }))
   const r = await loadState()
   assert.deepEqual(r.items, {})
   assert.equal(r.verified, true)
@@ -323,7 +330,7 @@ test('loadState: 新規作成（items: {}）は検証成立で verified: true', 
 // Issue #535: state:load が先頭 5 件しか返さない場合、ホストが欠落キーを特定して 5 件ずつ再取得する。
 const makeItems = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [String(100 + i), { status: 'monitoring', pr: 1000 + i, branch: `fix/${100 + i}-x` }]))
 const hashesOf = (items) => Object.fromEntries(Object.entries(items).map(([k, v]) => [k, sha256Hex(canonicalJson(v))]))
-const verifyResult = (hashes) => ({ fileExists: true, hashes, keysSha256: keysOf(hashes), keysCount: Object.keys(hashes).length, highWaterBytes: 0, highWaterVersion: 0 })
+const verifyResult = (hashes) => verifyOut(hashes)
 // fill プロンプトの state-read.sh keys <状態ファイル> <キー>... から要求キーを取り出し、実ファイル相当の items から返す。
 const requestedKeys = (prompt) => /state-read\.sh keys \S+((?: [0-9]+)+)$/m.exec(prompt)[1].trim().split(' ')
 
@@ -427,7 +434,7 @@ test('loadState: 全件が初回で返れば再取得エージェントは起動
 
 test('検証プロンプトは項目ごとの jq -jcS ハッシュを要求し、読込プロンプトは分割読みと推測禁止を指示する', async () => {
   const { calls } = installAgentStub((opts) =>
-    opts.label === 'state:load' ? loadResult({}) : { fileExists: true, hashes: {}, keysSha256: keysOf({}), keysCount: Object.keys({}).length, highWaterBytes: 0, highWaterVersion: 0 })
+    opts.label === 'state:load' ? loadResult({}) : verifyOut({}))
   await loadState()
   // 検証は同梱の state-verify.sh を 1 コマンドで呼ぶ（項目ごとの jq -jcS のハッシュ・キーの絞り込みはスクリプトが行う。
   // 旧コマンドと同じ出力になることは state-scripts.test.mjs が実ファイルで検証する）
@@ -722,38 +729,154 @@ test('駆動部: 未検証の PR 記録を「作成済み」と報告しない�
 // Bugbot 指摘への回帰テスト
 // ---------------------------------------------------------------------------
 
-test('isValidStateVerifyResult: 必須フィールド・型・ハッシュ形式をすべて検証する', () => {
-  const ok = { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 0, highWaterVersion: 2 }
+test('isValidStateVerifyResult: 必須フィールド・型・ハッシュ形式・先頭 2 行の形をすべて検証する', () => {
+  const ok = verifyOut(SAMPLE_JQ_HASHES, { version: 2 })
   assert.equal(isValidStateVerifyResult(ok), true)
-  assert.equal(isValidStateVerifyResult({ fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }), true)
+  assert.equal(isValidStateVerifyResult(NOFILE_OUT), true)
   for (const bad of [
     null,
-    { fileExists: true },
-    { fileExists: true, hashes: SAMPLE_JQ_HASHES },
+    { headerLines: ok.headerLines },
+    { hashes: SAMPLE_JQ_HASHES },
+    // 旧形式の返却（エージェントが数値を分解して返す形）は受理しない
+    { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: 4, highWaterBytes: 0, highWaterVersion: 2 },
     { ...ok, hashes: null },
     { ...ok, hashes: [] },
     { ...ok, hashes: { 42: 'abc' } },
     { ...ok, hashes: { 42: SAMPLE_JQ_HASHES[42].toUpperCase() } },
-    { ...ok, highWaterBytes: -1 },
-    { ...ok, highWaterVersion: 1.5 },
-    { ...ok, fileExists: 'true' },
-    { ...ok, keysSha256: undefined },
-    { ...ok, keysSha256: '' },
-    { ...ok, keysSha256: 'E4B9' },
-    { fileExists: false, hashes: {}, keysSha256: keysOf({}), keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 },
-    { ...ok, keysCount: undefined },
-    { ...ok, keysCount: -1 },
-    { fileExists: false, hashes: {}, keysSha256: '', keysCount: 3, highWaterBytes: 0, highWaterVersion: 0 },
+    { ...ok, headerLines: undefined },
+    { ...ok, headerLines: '' },
+    { ...ok, headerLines: ['KEYS', 'HIGHWATER'] },
+    { ...ok, headerLines: `KEYS ${keysOf(SAMPLE_JQ_HASHES)} 4\n[0,2]` },
+    // NOFILE なのに hashes がある
+    { headerLines: 'NOFILE', hashes: { 42: SAMPLE_JQ_HASHES[42] } },
   ]) {
     assert.equal(isValidStateVerifyResult(bad), false, JSON.stringify(bad))
   }
+})
+
+// state-verify.sh の先頭 2 行の分解（Issue #23）。エージェントは行を加工せずに写し、ホストが分解する。
+const EMPTY_KEYS = '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945' // jq -jc '[]' の sha256
+const NEW_FILE = { fileExists: true, keysSha256: EMPTY_KEYS, keysCount: 0, highWaterBytes: 0, highWaterVersion: 2 }
+
+test('parseStateVerifyHeader: 新規の状態ファイル（items: {}・高水位 0・版 2）の 2 行を bytes 0・version 2 に分解する（Issue #23 の再現）', () => {
+  assert.deepEqual(parseStateVerifyHeader(`KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=2`), NEW_FILE)
+  assert.deepEqual(parseStateVerifyHeader('NOFILE'), { fileExists: false, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 })
+  assert.deepEqual(
+    parseStateVerifyHeader(`KEYS ${keysOf(SAMPLE_JQ_HASHES)} 4\nHIGHWATER bytes=5489787 version=2`),
+    { fileExists: true, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: 4, highWaterBytes: 5489787, highWaterVersion: 2 },
+  )
+})
+
+test('parseStateVerifyHeader: 前後の空白・改行（CRLF・空行）・行の順序の揺れは同じ値に分解する', () => {
+  for (const text of [
+    `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=2\n`,
+    `\n  KEYS ${EMPTY_KEYS} 0  \n\tHIGHWATER bytes=0 version=2\t\n\n`,
+    `KEYS ${EMPTY_KEYS} 0\r\nHIGHWATER bytes=0 version=2\r\n`,
+    `HIGHWATER bytes=0 version=2\nKEYS ${EMPTY_KEYS} 0`,
+    `KEYS ${EMPTY_KEYS} 0\n\n\nHIGHWATER bytes=0 version=2`,
+    `KEYS  ${EMPTY_KEYS}\t0\nHIGHWATER bytes=0   version=2`,
+  ]) {
+    assert.deepEqual(parseStateVerifyHeader(text), NEW_FILE, JSON.stringify(text))
+  }
+  assert.equal(parseStateVerifyHeader('  NOFILE\n').fileExists, false)
+})
+
+test('parseStateVerifyHeader: ラベル違い・数値でない・余分な行・欠けた行は分解せず null（照合不成立）', () => {
+  const K = `KEYS ${EMPTY_KEYS} 0`
+  const W = 'HIGHWATER bytes=0 version=2'
+  for (const text of [
+    // 形の誤り・欠落
+    undefined, null, 0, '', '   \n', K, W, ['KEYS', 'HIGHWATER'],
+    // 旧形式の 2 行目・ラベル違い
+    `${K}\n[0,2]`,
+    `${K}\nHIGHWATR bytes=0 version=2`,
+    `${K}\nhighwater bytes=0 version=2`,
+    `${K}\nHIGHWATER version=2 bytes=0`,
+    `${K}\nHIGHWATER bytes:0 version:2`,
+    `${K}\nHIGHWATER 0 2`,
+    `KEY ${EMPTY_KEYS} 0\n${W}`,
+    `keys ${EMPTY_KEYS} 0\n${W}`,
+    // 数値でない・負・小数・先頭のゼロ・桁あふれ
+    `${K}\nHIGHWATER bytes=abc version=2`,
+    `${K}\nHIGHWATER bytes=0 version=-1`,
+    `${K}\nHIGHWATER bytes=0 version=2.0`,
+    `${K}\nHIGHWATER bytes=01 version=2`,
+    `${K}\nHIGHWATER bytes=0 version=`,
+    `${K}\nHIGHWATER bytes=1e3 version=2`,
+    `${K}\nHIGHWATER bytes=${'9'.repeat(16)} version=2`,
+    `KEYS ${EMPTY_KEYS} x\n${W}`,
+    `KEYS ${EMPTY_KEYS.toUpperCase()} 0\n${W}`,
+    `KEYS ${EMPTY_KEYS.slice(1)} 0\n${W}`,
+    `KEYS ${EMPTY_KEYS} 0 extra\n${W}`,
+    `${K}\n${W} extra`,
+    // 余分な行（重複・ハッシュ行・NOFILE の混在）
+    `${K}\n${W}\n${W}`,
+    `${K}\n${K}\n${W}`,
+    `${K}\n${K}`,
+    `${W}\n${W}`,
+    `${K}\n${W}\n42 ${EMPTY_KEYS}`,
+    `${K}\n${W}\nNOFILE`,
+    `NOFILE\n${K}`,
+    'NOFILE\nNOFILE',
+    'NOFILE extra',
+  ]) {
+    assert.equal(parseStateVerifyHeader(text), null, JSON.stringify(text))
+  }
+})
+
+test('loadState: 新規作成した状態ファイル（items: {}・高水位 0・版 2）は、検証が state-verify.sh の行をそのまま返せば照合が成立する（Issue #23 の再現）', async () => {
+  const { calls } = installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      : { headerLines: `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=2`, hashes: {} })
+  const r = await loadState()
+  assert.deepEqual(r.items, {})
+  assert.equal(r.verified, true)
+  assert.equal(r.highWaterBytes, 0)
+  assert.equal(r.highWaterVersion, 2)
+  assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify'])
+})
+
+test('loadState: 検証が返す行に空白・改行・順序の揺れがあっても照合が成立する', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? loadResult(sampleItems, { highWaterBytes: 4096, highWaterVersion: 2 })
+      : { headerLines: `\r\n HIGHWATER bytes=4096 version=2 \r\n\tKEYS ${keysOf(SAMPLE_JQ_HASHES)} 4\n`, hashes: SAMPLE_JQ_HASHES })
+  const r = await loadState()
+  assert.equal(r.verified, true)
+  assert.equal(r.highWaterBytes, 4096)
+  assert.equal(r.highWaterVersion, 2)
+})
+
+test('loadState: haiku が行を加工して返したら（旧形式・ラベル違い）sonnet で取り直し、sonnet も加工すれば停止する', async () => {
+  const loaded = { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+  const good = { headerLines: `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=2`, hashes: {} }
+  for (const tampered of [`KEYS ${EMPTY_KEYS} 0\n[0,2]`, `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=two`, `${good.headerLines}\nextra`]) {
+    const { calls } = installAgentStub((opts) => {
+      if (opts.label === 'state:load') return loaded
+      return opts.model === 'haiku' ? { headerLines: tampered, hashes: {} } : good
+    })
+    const r = await loadState()
+    assert.equal(r.highWaterVersion, 2, tampered)
+    assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify', 'state:load-verify:fallback-sonnet'])
+    installAgentStub((opts) => (opts.label === 'state:load' ? loaded : { headerLines: tampered, hashes: {} }))
+    await assert.rejects(() => loadState(), /内容照合が成立しなかったため停止した（新規着手 0 件）/, tampered)
+  }
+})
+
+test('loadState: 高水位の行が読込側と食い違えば（version 0 など）従来どおり停止する（fail-closed は変えない）', async () => {
+  installAgentStub((opts) =>
+    opts.label === 'state:load'
+      ? { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 2 }
+      : { headerLines: `KEYS ${EMPTY_KEYS} 0\nHIGHWATER bytes=0 version=0`, hashes: {} })
+  await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
 test('loadState: 検証エージェントの haiku が { fileExists: true } だけを返したら sonnet へフォールバックして照合する', async () => {
   const { calls } = installAgentStub((opts) => {
     if (opts.label === 'state:load') return loadResult(sampleItems)
     if (opts.model === 'haiku') return { fileExists: true }
-    return { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: keysOf(SAMPLE_JQ_HASHES), keysCount: Object.keys(SAMPLE_JQ_HASHES).length, highWaterBytes: 0, highWaterVersion: 0 }
+    return verifyOut(SAMPLE_JQ_HASHES)
   })
   const r = await loadState()
   assert.deepEqual(calls.map((c) => c.opts.label), ['state:load', 'state:load-verify', 'state:load-verify:fallback-sonnet'])
@@ -859,7 +982,7 @@ test('loadState: 両エージェントが同じ項目を読み落とした場合
     opts.label === 'state:load'
       ? loadResult(readItems)
       // 検証側の KEYS 行は jq が実ファイルから計算するため 44 を含む全キーのダイジェストのまま
-      : { fileExists: true, hashes: returnedHashes, keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 4, highWaterBytes: 0, highWaterVersion: 0 })
+      : verifyOut(returnedHashes, { keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 4 }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
@@ -867,7 +990,7 @@ test('loadState: 両側が空（items: {}・hashes: {}）でも実ファイル�
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult({})
-      : { fileExists: true, hashes: {}, keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 4, highWaterBytes: 0, highWaterVersion: 0 })
+      : verifyOut({}, { keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 4 }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 
@@ -877,7 +1000,7 @@ test('loadState: 数値でないキーが混在するファイルでも、数値
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(items)
-      : { fileExists: true, hashes, keysSha256: JQ_KEYS_SHA_MIXED, keysCount: 5, highWaterBytes: 0, highWaterVersion: 0 })
+      : verifyOut(hashes, { keysSha256: JQ_KEYS_SHA_MIXED, keysCount: 5 }))
   const r = await loadState()
   assert.deepEqual(Object.keys(r.items).sort(), ['1000', '42', '43', '44', '45'])
   assert.deepEqual(r.unverified, [])
@@ -885,7 +1008,7 @@ test('loadState: 数値でないキーが混在するファイルでも、数値
 
 test('検証プロンプトは KEYS 行（数値キー一覧の jq -jc ダイジェスト）を要求する', async () => {
   const { calls } = installAgentStub((opts) =>
-    opts.label === 'state:load' ? loadResult({}) : { fileExists: true, hashes: {}, keysSha256: JQ_KEYS_SHA_EMPTY, keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 })
+    opts.label === 'state:load' ? loadResult({}) : verifyOut({}, { keysSha256: JQ_KEYS_SHA_EMPTY, keysCount: 0 }))
   await loadState()
   const p = calls[1].prompt
   // KEYS 行の計算は state-verify.sh が行う（出力が旧コマンドとバイト単位で同じことは state-scripts.test.mjs が検証する）
@@ -896,7 +1019,7 @@ test('検証プロンプトは KEYS 行（数値キー一覧の jq -jc ダイジ
   // 高水位の行・項目ごとのハッシュ行（while ループ）より前に出す（Bugbot 指摘）。
   const branchStart = sh.indexOf('if [ -f "${f}" ]; then')
   const keysIdx = sh.indexOf('echo "KEYS ')
-  const hwIdx = sh.indexOf("jq -c '[.perWorktreeByteReserveHighWater")
+  const hwIdx = sh.indexOf(`jq -r '"HIGHWATER bytes=`)
   const loopIdx = sh.indexOf('while IFS= read -r k')
   assert.ok(branchStart > 0 && keysIdx > branchStart && keysIdx < hwIdx && hwIdx < loopIdx, 'KEYS 行が出力の先頭にない')
   assert.doesNotMatch(sh.slice(branchStart, keysIdx), /echo |printf |jq -c|jq -r/, 'KEYS 行より前に別の出力がある')
@@ -905,18 +1028,23 @@ test('検証プロンプトは KEYS 行（数値キー一覧の jq -jc ダイジ
   assert.match(p, /同じコマンドの末尾に行範囲を足して〔例: 1 20〕分割実行し全件を取得する/)
 })
 
-test('検証プロンプトは keysSha256 / keysCount を KEYS 行からそのまま転記させ、再計算・自前のキー一覧からの作成を禁じる', async () => {
+test('検証プロンプトは KEYS 行・HIGHWATER 行を加工せず headerLines へ写させ、数値の分解・再計算をさせない（Issue #23）', async () => {
   const { calls } = installAgentStub((opts) =>
-    opts.label === 'state:load' ? loadResult({}) : { fileExists: true, hashes: {}, keysSha256: JQ_KEYS_SHA_EMPTY, keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 })
+    opts.label === 'state:load' ? loadResult({}) : verifyOut({}, { keysSha256: JQ_KEYS_SHA_EMPTY, keysCount: 0 }))
   await loadState()
-  assert.match(calls[1].prompt, /先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）/)
+  const p = calls[1].prompt
+  assert.match(p, /headerLines へ、出力の KEYS で始まる行と HIGHWATER で始まる行を 1 文字も変えずにそのまま写す/)
+  assert.match(p, /NOFILE なら headerLines: "NOFILE"・hashes: \{\}/)
+  assert.match(p, /数値を取り出したり、並べ替えたり、計算し直したり、返すキー一覧から作ったりしない/)
+  // 旧プロンプトの「2 行目を highWaterBytes・highWaterVersion」（位置で数値を分解させる指示）を残さない
+  assert.doesNotMatch(p, /highWaterBytes|highWaterVersion|keysSha256|keysCount|fileExists/)
 })
 
 test('loadState: KEYS 行の件数（keysCount）と hashes の件数が一致しなければ停止する', async () => {
   installAgentStub((opts) =>
     opts.label === 'state:load'
       ? loadResult(sampleItems)
-      : { fileExists: true, hashes: SAMPLE_JQ_HASHES, keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 5, highWaterBytes: 0, highWaterVersion: 0 })
+      : verifyOut(SAMPLE_JQ_HASHES, { keysSha256: JQ_KEYS_SHA_SAMPLE, keysCount: 5 }))
   await assert.rejects(() => loadState(), /成立しなかったため停止した/)
 })
 

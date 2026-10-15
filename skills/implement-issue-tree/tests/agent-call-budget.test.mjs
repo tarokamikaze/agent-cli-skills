@@ -152,15 +152,12 @@ function buildTree(leaves) {
 // で終端させる（マージまで進める必要はなく、1 issue あたり約 10 回のエージェント呼び出しになる）。
 // cutoffAfter: ランタイムの打ち切りを模して、この回数を超えた agent() は null を返す。
 // 保存済み状態（照合用のハッシュ付き）。monitoring 再開の候補を作るために使う。
-function stateVerifyFor(items) {
+// 返却は state-verify.sh の先頭 2 行（headerLines）と「キー ハッシュ」行（hashes）。数値の分解はホストが行う。
+function stateVerifyFor(items, version = 0) {
   const keys = Object.keys(items).sort()
   return {
-    fileExists: true,
+    headerLines: `KEYS ${sha256Hex(canonicalJson(keys))} ${keys.length}\nHIGHWATER bytes=0 version=${version}`,
     hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(items[k]))])),
-    keysSha256: sha256Hex(canonicalJson(keys)),
-    keysCount: keys.length,
-    highWaterBytes: 0,
-    highWaterVersion: 0,
   }
 }
 async function runScript({ args, leaves, cutoffAfter = Infinity, override = () => undefined, constAgent = false, saved = null, tree = null }) {
@@ -177,7 +174,7 @@ async function runScript({ args, leaves, cutoffAfter = Infinity, override = () =
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') return { ok: true, fileExisted: saved !== null, items: saved ?? {}, highWaterBytes: 0, highWaterVersion: saved ? 2 : 0 }
-    if (label === 'state:load-verify') return saved === null ? { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 } : { ...stateVerifyFor(saved), highWaterVersion: 2 }
+    if (label === 'state:load-verify') return saved === null ? { headerLines: 'NOFILE', hashes: {} } : stateVerifyFor(saved, 2)
     if (label === 'plan:issue-tree') return { nodes: structuredClone(nodes) }
     if (label === 'detect:external-checks') return { apps: [] }
     if (label.startsWith('plan:declared-deps')) {

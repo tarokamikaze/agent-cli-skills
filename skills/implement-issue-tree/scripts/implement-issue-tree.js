@@ -3133,7 +3133,6 @@ return enc(v).replace(/\x7f/g, '\\u007f')
 
 
 const hasOwn=(o,k)=>Object.prototype.hasOwnProperty.call(o,k)
-const isNonNegInt=(x)=>Number.isInteger(x)&&x>=0
 
 function verifyLoadedItems(items,check){
 const hashes=check?.fileExists===true&&check.hashes?check.hashes:null
@@ -3163,14 +3162,35 @@ return{adopted,dropped,unverified,verified:hashes!==null&&unverified.length===0&
 
 
 
+
+
+function parseStateVerifyHeader(text){
+if(typeof text!=='string')return null
+const lines=text.split('\n').map((l)=>l.trim()).filter(Boolean)
+if(lines.length===1&&lines[0]==='NOFILE'){
+return{fileExists:false,keysSha256:'',keysCount:0,highWaterBytes:0,highWaterVersion:0}
+}
+const n='(0|[1-9]\\d{0,14})'
+const k=lines.map((l)=>new RegExp(`^KEYS[ \\t]+([0-9a-f]{64})[ \\t]+${n}$`).exec(l))
+const w=lines.map((l)=>new RegExp(`^HIGHWATER[ \\t]+bytes=${n}[ \\t]+version=${n}$`).exec(l))
+const ki=k.findIndex(Boolean)
+const wi=w.findIndex(Boolean)
+if(lines.length!==2||ki<0||wi<0||ki===wi)return null
+return{fileExists:true,keysSha256:k[ki][1],keysCount:Number(k[ki][2]),highWaterBytes:Number(w[wi][1]),highWaterVersion:Number(w[wi][2])}
+}
+
+
+
+
+
 function isValidStateVerifyResult(r){
 const h=r?.hashes
+const head=parseStateVerifyHeader(r?.headerLines)
 return(
-typeof r?.fileExists==='boolean'&&
+head!==null&&
 h!==null&&typeof h==='object'&& !Array.isArray(h)&&
 Object.values(h).every((x)=> /^[0-9a-f]{64}$/.test(x)) &&
-(r.fileExists? /^[0-9a-f]{64}$/.test(r.keysSha256) : r.keysSha256 === '' && r.keysCount === 0) &&
-isNonNegInt(r.keysCount)&&isNonNegInt(r.highWaterBytes)&&isNonNegInt(r.highWaterVersion)
+(head.fileExists||Object.keys(h).length===0)
 )
 }
 
@@ -3183,14 +3203,10 @@ const isValidStateFillResult=(r)=>r?.items!==null&&typeof r?.items==='object'&& 
 
 const STATE_VERIFY_SCHEMA={
 type:'object',
-required:['fileExists','hashes','keysSha256','keysCount','highWaterBytes','highWaterVersion'],
+required:['headerLines','hashes'],
 properties:{
-fileExists:{type:'boolean'},
+headerLines:{type:'string'},
 hashes:{type:'object',additionalProperties:{type:'string'}},
-keysSha256:{type:'string'},
-keysCount:{type:'integer',minimum:0},
-highWaterBytes:{type:'integer',minimum:0},
-highWaterVersion:{type:'integer',minimum:0},
 },
 }
 
@@ -3256,16 +3272,19 @@ throw new Error(
 }
 
 
-const{result:check}=await runStateAgent(
+
+
+const{result:verifyRaw}=await runStateAgent(
 [
 TEMP_FILE_POLICY,
 STATE_SCRIPT_ONLY,
 `状態ファイルのハッシュ取得（読み取り専用）。次をそのまま実行し出力を転記する（推測しない。キー行が切れたら、同じコマンドの末尾に行範囲を足して〔例: 1 20〕分割実行し全件を取得する）:`,
 scriptCommand('state-verify.sh',` ${STATE_FILE}`),
-`返却: NOFILE なら fileExists: false・hashes: {}・keysSha256: ""・他 0。他は fileExists: true、先頭の KEYS 行の 2 列目を keysSha256・3 列目を keysCount へそのまま転記する（自分で計算し直したり、返すキー一覧から作ったりしない）。2 行目を highWaterBytes・highWaterVersion、以降の「キー ハッシュ」行を hashes。`,
+`返却: NOFILE なら headerLines: "NOFILE"・hashes: {}。それ以外は headerLines へ、出力の KEYS で始まる行と HIGHWATER で始まる行を 1 文字も変えずにそのまま写す（2 行を改行でつなぐ。数値を取り出したり、並べ替えたり、計算し直したり、返すキー一覧から作ったりしない。分解と照合はホストが行う）。3 行目以降の「キー ハッシュ」行を hashes（キー → ハッシュ）。`,
 ].join('\n'),
 {label:'state:load-verify',schema:STATE_VERIFY_SCHEMA,isValid:isValidStateVerifyResult},
 )
+const check=verifyRaw&&{ ...parseStateVerifyHeader(verifyRaw.headerLines),hashes:verifyRaw.hashes}
 
 
 
@@ -3793,7 +3812,7 @@ return typeof b==='string'&& !/\.\./.test(b) && /^[a-zA-Z0-9][a-zA-Z0-9\-_./]*$/
 const SCRIPT_SHA256={
 'measure-residual-bytes.sh':'27c6c6762f1e702f2bf3111a7c951989b1dba99c5703767bcbb21a295a6da99d',
 'measure-free-disk.sh':'591ad8f42964637a2887bf0680437745e9685e40b49dbc7d8319d5b98045d293',
-'state-verify.sh':'dfbcfbed81047c34a6e00c1e14657ffda9059933bfe6f6ab42587a790105e70e',
+'state-verify.sh':'b4f0158663318342de6e0336475a47e58b887e3ab96df2b6d78ecbf945929a4e',
 'state-read.sh':'b9a4f5c2d31a244b074a5e65c562e28dfadc7cba81b4bdff06045c3aa6087498',
 'state-write.sh':'da2a68c6b71e14cd4b405098d7459129951a38bd9456adbfb675fb075b87b6d9',
 'fetch-tree.sh':'e08d9f328e39de838b4bb7aa0fdbf4826f185eaba0a21ccf89133f0850351097',
