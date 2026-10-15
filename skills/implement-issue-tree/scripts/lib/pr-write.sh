@@ -3,7 +3,7 @@
 #
 # 呼び出し元: pr-body-edit.sh / optin-record-count.sh / pr-comment.sh（Issue #11 の範囲 C: PR 作成・fix・Low 指摘の
 #             コメント・opt-in 記録の確認の agent にシェルを組み立てさせず、同梱スクリプトを 1 コマンドで呼ばせる）。
-# 役割: 引数（PR 番号・sha・nonce・opt-in テストのコマンド）の形式検証、agent が Write ツールで書いたファイルの照合、
+# 役割: 引数（PR 番号・sha・nonce・opt-in テストのコマンド・URL エンコード済みのブランチ名）の形式検証、PR の head・base の照合、agent が Write ツールで書いたファイルの照合、
 #       PR 本文の取得、opt-in テスト実行記録の節の書き直し。
 # 契約: 失敗は非ゼロ return。source 元のシェル状態を壊さないため set -e / set -u / trap / exit は置かない。
 #       二重 source は無害（ガードで即 return）。pw_verify_written は lib/signed-output.sh の so_sha256 を使う
@@ -85,6 +85,37 @@ pw_verify_written() {
     return 1
   fi
   printf '%s' "${content}" >"$4"
+}
+
+# URL エンコード済みのブランチ名（ホストの encodeURIComponent。sanitizeBranch を通った値なので英数字・-・_・.・%2F だけに
+# なる）を元の名前に戻して標準出力へ出す。%2F 以外の % を含む・.. を含む・戻した値がホストの sanitizeBranch の形
+# （^[A-Za-z0-9][A-Za-z0-9._/-]*$）でない・400 文字超は非ゼロ。
+pw_decode_branch() {
+  local enc="$1" dec
+  case "${enc}" in
+    '' | *..* | *[!A-Za-z0-9._%-]*) return 1 ;;
+  esac
+  [ "${#enc}" -le 400 ] || return 1
+  dec=$(printf '%s' "${enc}" | sed -e 's/%2[Ff]/\//g') || return 1
+  case "${dec}" in
+    *%* | [!A-Za-z0-9]*) return 1 ;;
+  esac
+  printf '%s' "${dec}"
+}
+
+# PR $1 の head ブランチと base ブランチが、ホストの知る名前（$2・$3。戻した値）と一致するか確かめる。agent が PR 番号を
+# 写し間違えると、無関係な PR の本文に Closes 行と対象外節を足すことになるため、本文に触れる前に照合する（Issue #18）。
+# 取得の失敗・項目の欠落（null）・不一致は、標準エラーに理由を出して非ゼロ。
+pw_verify_pr_refs() {
+  local got
+  got=$(gh pr view "$1" --json headRefName,baseRefName --jq '.headRefName, .baseRefName') || {
+    echo "FAILED: PR #$1 の head・base を取得できない" >&2
+    return 1
+  }
+  if [ "${got}" != "$2"$'\n'"$3" ]; then
+    echo "FAILED: PR #$1 の head・base がホストの知るブランチ（$2 → $3）と一致しない" >&2
+    return 1
+  fi
 }
 
 # PR 本文を $2 へ書く（旧プロンプトの gh pr view <N> --json body --jq '.body // ""' > "$f" と同じ。本文の後ろに改行 1 つ）

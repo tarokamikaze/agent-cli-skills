@@ -904,7 +904,7 @@ test('記録節の書き直し: 追記する記録節は固定形式の行のみ
     assert.doesNotMatch(text, /- 補足:|OPTIN_NONCE/)
   }
   assert.match(update, /pr-body-edit\.sh optin 123 /)
-  assert.match(pr, /pr-body-edit\.sh ensure <番号> 42 --optin /)
+  assert.match(pr, /pr-body-edit\.sh ensure <番号> 42 feat%2F42-sample main --optin /)
 })
 
 test('記録節の書き直し: 除去パターンの元になる 3 定数は ERE メタ文字・単一引用符を含まない（エスケープ不要の前提を固定。PR #505 codex P1）', () => {

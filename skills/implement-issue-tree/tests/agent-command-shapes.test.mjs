@@ -173,7 +173,10 @@ test('範囲 C で同梱スクリプトへ移した書き込み（PR 本文・�
   }
   // opt-in テストのコマンドは空白を %20 にして渡す（引用符を使わない）
   assert.ok(all.includes('pr-body-edit.sh optin 1005 <sha> <results> make%20e2e'), 'fix の手順 4b')
-  assert.ok(all.includes('pr-body-edit.sh ensure <番号> 5 --oos '), 'PR 作成の手順 1c（対象外節あり）')
+  // ブランチ名・ベース名は URL エンコードして渡し、スクリプトが PR の head・base と照合する
+  assert.ok(all.includes('pr-body-edit.sh ensure <番号> 5 feat%2F5-x main --oos '), 'PR 作成の手順 1c（対象外節あり）')
+  assert.ok(all.includes('pr-body-edit.sh ensure <番号> 6 feat%2F5-x release%2Fv1.2'), 'PR 作成の手順 1c（ベースブランチに / を含む）')
+  assert.ok(all.includes(' worktree-exclude.sh'), 'コミットの前の一時ファイルの除外設定')
   assert.ok(all.includes(' --optin <sha> <results> make%20e2e'), 'PR 作成の手順 1c（opt-in 記録節）')
   assert.ok(all.includes('optin-record-count.sh 1005 make%20e2e'), 'マージ前の opt-in 記録の確認')
   assert.ok(all.includes('pr-body-edit.sh oos-append 1005 '), 'fix の手順 6')

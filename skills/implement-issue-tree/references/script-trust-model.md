@@ -179,19 +179,21 @@ PR 作成・fix・Low 指摘のコメント・opt-in 記録の確認の agent �
 
 | スクリプト | 置き換えた手順 | 出力 |
 |------------|----------------|------|
-| `pr-body-edit.sh ensure` | PR 作成の手順 1c（既存 PR の再利用時の本文の補正: Closes 行・対象外節・opt-in 記録節） | `OK`、失敗は標準エラーの `FAILED: <理由>` と exit 1 |
+| `pr-body-edit.sh ensure` | PR 作成の手順 1c（既存 PR の再利用時の本文の補正: Closes 行・対象外節・opt-in 記録節。PR の head・base をホストの知るブランチ名・ベース名と照合してから書く） | `OK`、失敗は標準エラーの `FAILED: <理由>` と exit 1 |
 | `pr-body-edit.sh optin` | fix の手順 4b（opt-in 記録節の書き直し） | 同上 |
 | `pr-body-edit.sh oos-append` | fix の手順 6（対象外の指摘の記録） | 同上 |
 | `optin-record-count.sh` | マージ前の opt-in 記録の確認（本文の正規化と `grep -cxF` の 3 本） | `HEAD <sha>` と `COUNT <index> <pass> <nonPass>` の行（旧手順と同じ件数）。取得失敗は何も出さず exit 1 |
 | `pr-comment.sh` | 最終 Review の Low 指摘のコメント（`--body "$(cat <<'LOWEOF' ...)"`） | `gh pr comment` の出力 |
 | `resolve-thread.sh` | fix の手順 5（resolve の GraphQL mutation） | `gh api graphql` の出力と終了コード |
+| `worktree-exclude.sh` | （新設。旧手順に無い）コミットを作る手順の `git add` の前に、Write ツールで書く一時ファイルのパターンを `info/exclude` に載せる | `OK`、失敗は標準エラーの `FAILED: <理由>` と exit 1 |
 
 未信頼の自由文の扱い:
 
 - コマンド行にも HEREDOC にも載せない。ホストが内容を知っている自由文（Low 指摘のコメント本文・PR 作成時の対象外節）は、`state-write.sh` の patch と同じ形にした。agent が Write ツールでカレントディレクトリの `.implement-issue-tree-<nonce>.md` に書き、スクリプトが自分の一時ファイルへ写してから `SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容〔末尾の改行を除く〕)` をホストの渡した値と照合し、一致したときだけ使う（束縛先はコメントなら PR 番号、対象外節なら issue 番号）。ファイルは成否に関わらず消す。nonce は内容から導出し（`fileNonce`）、プロンプトでのデータ境界のトークンにも使う（内容に自分自身のハッシュを含めることはできないので、境界を偽装できない）
-- fix が自分で書く対象外の行は、ホストが内容を知らないので照合値が無い。`oos-append` は代わりに行の形（`- [threadId: <threadId>] <本文>`・20 行以内・1 行 2000 バイト以内）と、threadId がホストの渡した未解決スレッドの一覧にあることを確かめる。GitHub の closing keyword の形（`close` / `fix` / `resolve` の活用形の後に `#N`・`owner/repo#N`・Issue の URL。大文字小文字を問わない）を含む行は書き込まない（PR のマージ時に無関係な Issue を閉じさせられるため）
+- fix が自分で書く対象外の行は、ホストが内容を知らないので照合値が無い。`oos-append` は代わりに行の形（`- [threadId: <threadId>] <本文>`・20 行以内・1 行 2000 バイト以内）と、threadId がホストの渡した未解決スレッドの一覧にあることを確かめる。GitHub の closing keyword の形（`close` / `fix` / `resolve` の活用形の後に、任意の空白・コロン・開き括弧〔`(`・`<`・`[`〕を挟んで `#N`・`owner/repo#N`・`GH-N`・Issue の URL。大文字小文字を問わない）を含む行は書き込まない（PR のマージ時に無関係な Issue を閉じさせられるため）。GitHub が閉じると確かめた形より広く、拒否する側に倒している。検査の `grep` の終了コードは 1（一致しない）のときだけ通し、2 以上（エラー）は検査できないとして失敗にする
 - ホストは照合値と nonce を、スクリプトと同じく内容の末尾の改行を除いてから計算する（除かないと、末尾が改行になる内容〔指摘が空のコメントなど〕は必ず不一致になる）
-- agent が Write したあとにスクリプトを起動できなかった経路（hook の拒否・中断）では、`.implement-issue-tree-<nonce>.md` が worktree のルートに残りうる。コミットを作る手順（Implement・recover-implement・fix と、PR 作成・fix の base 取り込みの解消）は、`git add` の前に `rm -f -- .implement-issue-tree-*.md` で消してからコミットする（`WRITTEN_FILE_COMMIT_GUARD`）
+- agent が Write したあとにスクリプトを起動できなかった経路（hook の拒否・中断）では、`.implement-issue-tree-<nonce>.md` が worktree のルートに残りうる。コミットを作る手順（Implement・recover-implement・fix と、PR 作成・fix の base 取り込みの解消）は、`git add` の前に `rm -f -- .implement-issue-tree-*.md` で消してからコミットする（`WRITTEN_FILE_COMMIT_GUARD`）。この消去は agent が手順に従うことと、カレントディレクトリが作業ツリーのルートであることに依存するため、同じ手順の前に `worktree-exclude.sh` が `.implement-issue-tree-*.md`・`*.patch-*.json`・`*.sweep-*.json` を `git rev-parse --git-path info/exclude` の示すファイルへ書き、サブディレクトリの `git add -A` でも stage されないようにする。git が読む `info/exclude` は linked worktree でも共有の `$GIT_COMMON_DIR/info/exclude` だけで（worktree ごとの `$GIT_DIR/info/exclude` は読まれない）、`--git-path` はその共有のファイルを返すので、1 回書けばすべての worktree に効く。worktree はランタイムが作り、ホストはファイルシステムに触れないため、コミットを作る agent が起動する。失敗してもコミットは止めない（消去の手順が残る）
+- PR 作成の手順 1c の `<番号>` は agent が手順 1b の結果から置き換える値で、写し間違えると無関係な PR の本文に `Closes #<issue>` と対象外節を足しうる。ホストは作業ブランチ名とベースブランチ名を URL エンコードして `ensure` に渡し、スクリプトは本文を取得する前に `gh pr view <番号> --json headRefName,baseRefName` と照合する。一致しない・取得に失敗した・項目が無いときは `gh pr edit` を呼ばずに失敗する
 - 既存の PR 本文はスクリプトの中だけで扱い、agent のコンテキストに入れない。opt-in テストのコマンドは空白を `%20` にして引数で渡す（ホストの許可文字集合に引用符・`$`・`%` は無い）
 
 本文の全文を置き換える書き戻しは fail-closed にした: 取得の失敗・補正後が空・取得した本文にあった `Closes #` の行や対象外の見出しが補正後に無い、のいずれかなら `gh pr edit` を呼ばない。書き戻したあとは本文を取り直し、足したもの（Closes 行・対象外の見出しと各 threadId・記録節の各マーカー行）があることを確かめ、無ければ失敗を返す。
@@ -206,7 +208,7 @@ PR 作成・fix・Low 指摘のコメント・opt-in 記録の確認の agent �
 - 対象外節の追記は旧手順では agent に任せていた形を、`ensure` は空行 1 つと節、`oos-append` は節の末尾（次の見出しの手前）への行の追加に固定した
 - `resolve-thread.sh` は threadId を `-f`（文字列）で渡す（旧手順の `-F` は数値・真偽値に見える値を型変換する）。mutation は同じ
 
-回帰防止: `tests/write-scripts.test.mjs` が、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`pr edit` は `--body-file` の内容で本文を置き換え、`pr comment` は本文を記録する）で同じ入力に対して旧コマンドとスクリプトを実行し、書き戻した本文・投稿した本文・件数・mutation が一致することと、照合・fail-closed の分岐を確かめる。ホストのプロンプトから Write する内容とコマンドを取り出して流す確認も含む。
+回帰防止: `tests/write-scripts.test.mjs` が、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`pr edit` は `--body-file` の内容で本文を置き換え、`pr comment` は本文を記録する）で同じ入力に対して旧コマンドとスクリプトを実行し、書き戻した本文・投稿した本文・件数・mutation が一致することと、照合・fail-closed の分岐を確かめる。ホストのプロンプトから Write する内容とコマンドを取り出して流す確認も含む。PR の head・base の照合（不一致・取得失敗で `gh pr edit` を呼ばない）、closing keyword の広げた形と `grep` のエラーも同じファイルで確かめる。`tests/temp-file-exclude.test.mjs` は、実際の git リポジトリと linked worktree で `worktree-exclude.sh` を実行し、共有の `info/exclude` に全パターンが載ることと、サブディレクトリの `git add -A` が一時ファイルを stage しないことを確かめる。
 
 ## 関連
 

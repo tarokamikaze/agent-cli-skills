@@ -1363,6 +1363,14 @@ const COMMON = COMMON_LINES.join('\n')
 // PR に混入しうる。コミットを作る手順（Implement・recover-implement・fix・PR 作成と fix の base 取り込みの解消）で、
 // git add の前に消させる（Issue #11）。
 const WRITTEN_FILE_COMMIT_GUARD = '   git add の前に、作業ツリーのルートに .implement-issue-tree-*.md（Write ツールで書く一時ファイル。同梱スクリプトが読んで消すが、スクリプトを起動できなかったときは残る）があれば、rm -f -- .implement-issue-tree-*.md を単独で実行して消す（コミットに含めない）。'
+// 上の消去は agent が手順に従うことと、カレントディレクトリが作業ツリーのルートであることに依存し、サブディレクトリで
+// git add -A すると残ったファイルが stage される。worktree-exclude.sh が一時ファイルのパターンを git の除外設定
+// （git rev-parse --git-path info/exclude。linked worktree でも全 worktree 共有のファイル）に載せる（Issue #21）。
+// worktree はランタイムが作り、ホストはファイルシステムに触れないため、コミットを作る agent が git add の前に起動する。
+// 失敗してもコミットは止めない（消去の手順が残る。除外設定は二重化の 1 層）。関数にするのは SCRIPT_SHA256 がこの後で定義されるため
+function tempFileExcludeLine() {
+  return `   git add の前に ${scriptCommand('worktree-exclude.sh')} を実行し、一時ファイル（.implement-issue-tree-*.md・*.patch-*.json・*.sweep-*.json）を git の除外設定に載せる（OK と出なければ summary に「一時ファイルの除外設定に失敗」と書いて続ける）。`
+}
 const commitlintCheckInstruction = `   コミット前に対象リポの commitlint 設定（commitlint.config.* / .commitlintrc* / package.json の commitlint フィールド。extends でプリセットを継承し rule が上書きされていなければプリセット側の rule も同じ規則で読む）を読み取り、rule を [severity, when, value] の tuple として解釈する: severity 0 の rule は無視する。type-enum / scope-enum は when が always なら列挙値が許可リスト（その中の値のみ使う）、never なら列挙値は拒否リスト（列挙値を使わない。never の列挙値を候補にしない）。type は変更内容に合う Conventional Commits 標準 type（feat / fix / docs / refactor / perf / test / style / build / ci / chore / revert）のうち許可されるもの（always なら列挙値に含まれる値、never なら列挙値に含まれない値）を選ぶ。always で標準 type が 1 つも許可されなければ、type-enum の列挙値を先頭から順に探索し ^[A-Za-z0-9_-]{1,64}$ を満たす最初のものを使う（先頭だけを見て諦めない）。never で全て拒否されたら change → update の順で拒否リストに無いものを使う。いずれでも決まらなければ type を決定できないとして下記の fail-closed 返却に従う。scope-empty は [*, "never"]（severity > 0）なら scope 必須、[*, "always"] なら scope 禁止（付けない）、severity 0・未設定なら任意（該当する scope が無ければ scope を省略する）。scope 必須のときは、scope-enum が always なら ^[A-Za-z0-9_-]{1,64}$ を満たす列挙値だけを順に探索し（変更内容に最も近いものを優先。判断できなければ先頭から）、該当する列挙値が 1 つも無ければ scope を決定できないとして fail-closed にする（直前コミットの scope や base ブランチ名由来の値は always の許可リストに含まれる保証が無いため使わない）。scope-enum が未設定 / never の場合に限り、同ブランチで既に hook を通過した直前コミットの scope（never の禁止値・上記正規表現に不適合な値は除外）、それも無ければ base ブランチ名の英数字以外を - に置換した値（同様に検証）の順で決める。決定できなければコミットせず「commitlint の scope-empty が scope を要求するが決定できない」を理由に fail-closed で返す。fail-closed 返却の形式（ホストが失敗として検出できる既存形式に限る。summary の文言だけでは検出されない）: implement / recover 経路は branch を空文字にし summary に理由を書く（ホストは branch が空のとき summary を理由に failed 終端する）。fix 経路は pushed: false・commitFailed: true・summary に理由を書く（ホストは commitFailed を失敗終端として扱う）。scope にイシュー番号を置かない（scope-enum を持つリポでは必ず失敗する）。イシューの紐付けは footer の Refs #<N> と PR 本文の Closes #<N> で行う。\n${WRITTEN_FILE_COMMIT_GUARD}`
 
 // base merge subject の type / scope 決定規則。未信頼テキスト（commitlint 設定・コミット履歴）
@@ -1386,7 +1394,7 @@ function subjectDecisionRules(failPre, failPost) {
 function baseMergeInstruction(base, runVerification = true, hostSubject = '') {
   const commitTail = ` — subject は MERGE_MSG に残る上記のものを使う。この git commit --no-edit も pre-commit / commit-msg hook を通るため、非 0 終了（hook 拒否。MERGE_HEAD が残る）なら (c) と同じく git merge --abort し、push せず「base merge コミット拒否: <hook 出力の要旨>」を理由として返す。--no-verify で強行せず、終了コードを無視して merge 前の HEAD を push してはならない）。`
   const resolveBranch = runVerification
-    ? `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから（${WRITTEN_FILE_COMMIT_GUARD.trim().replace(/。$/, '')}）git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
+    ? `その場で解消を試みる（CLAUDE.md・rules を遵守し、テスト実行規約に従いビルド・lint・テストを通してから（${tempFileExcludeLine().trim().replace(/。$/, '')}。${WRITTEN_FILE_COMMIT_GUARD.trim().replace(/。$/, '')}）git commit --no-edit でコミットする${commitTail}解消不能な場合は git merge --abort し、push せず「base コンフリクト解消不能」を理由として返す。`
     : `コンフリクト種別を問わず解消しない（内容編集の権限を持たない — build/lint/test 不可のため。submodule gitlink ポインタのコンフリクトも双方がポインタを変更した状態であり、base 側採用は PR 側の gitlink 更新を黙って破棄するため機械的に解消できない）。commit せず git merge --abort し、pushed: false・commitFailed: true・conflict: true・summary「base コンフリクト解消不能（内容編集の権限なし。fix/implement へ委譲要）」を返す（conflict: true はこのコンフリクト検出時のみ付ける。fetch / checkout 失敗・hook 拒否等の他の commitFailed 経路では conflict を付けない — ホストは conflict: true または hookRejected: true のとき検証権限を持つ fix 経路へ委譲する）。`
   const hookRejectReturn = runVerification
     ? '「base merge コミット拒否: <hook 出力の要旨>」を理由として返す'
@@ -3815,6 +3823,8 @@ const SCRIPT_SHA256 = {
   'optin-record-count.sh': '@@SCRIPT_SHA256:optin-record-count.sh@@',
   'pr-comment.sh': '@@SCRIPT_SHA256:pr-comment.sh@@',
   'resolve-thread.sh': '@@SCRIPT_SHA256:resolve-thread.sh@@',
+  // Write ツールで書く一時ファイルを git の除外設定に載せる（Issue #21。tempFileExcludeLine）
+  'worktree-exclude.sh': '@@SCRIPT_SHA256:worktree-exclude.sh@@',
   // worktree・ブランチの削除と破棄前の観測（Issue #11 の範囲 D）。削除の安全判定ごとスクリプトが持つ（判定の結果と順序は旧手順と同じ）
   'worktree-cleanup.sh': '@@SCRIPT_SHA256:worktree-cleanup.sh@@',
   'discard-safety.sh': '@@SCRIPT_SHA256:discard-safety.sh@@',
@@ -5001,6 +5011,7 @@ function implementPrompt(item, plan) {
     ...optinTestExecutionLines(item, '4b'),
     IMPL_STEP5,
     IMPL_STEP6,
+    tempFileExcludeLine(),
     commitlintCheckInstruction,
     // push・PR 作成は Review 通過後（Review 収束失敗時は CI を一切起動しない）。
     '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
@@ -5395,9 +5406,11 @@ function prCreatePrompt(item, impl, outOfScope) {
     // 既存 PR 本文は未信頼データ。シェル・HEREDOC・プロンプトへ載せず、取得・補正・gh pr edit・反映の確認を
     // pr-body-edit.sh ensure が行う（旧手順の grep || { echo; ...; } と grep -avE ... && mv の連結を agent に書かせない。
     // Issue #11）。補正の順（Closes 行 → 対象外節 → opt-in 記録節）と追記の形は旧手順と同じ。
-    `1c. （既存 PR 再利用時のみ）既存本文を補正する: 「Closes #${item.number}」が無ければ追記する（マージ時にイシューが自動クローズされないと監視が空転するため必ず存在させる）${outOfScopeItems.length ? '。「## 対象外（out-of-scope）」節が無ければ追記する（対象外項目は最終レポートの issue 化判断の材料であり、再利用経路でも失われてはならない）' : ''}${optinRecordSection ? '。opt-in テスト記録節を今回の結果へ書き直す' : ''}。既存本文は読まない（取得・補正・1 回の gh pr edit・反映の確認はスクリプトが行い、取得に失敗した本文・空の本文・Closes 行や対象外節を失う本文では更新しない）。`,
+    // <番号> は agent が手順 1b の結果から置き換える値なので、ホストが知るブランチ名とベース名（URL エンコード。
+    // required-context-missing.sh と同じ形）を渡し、スクリプトが PR の head・base と照合してから書く（Issue #18）。
+    `1c. （既存 PR 再利用時のみ）既存本文を補正する: 「Closes #${item.number}」が無ければ追記する（マージ時にイシューが自動クローズされないと監視が空転するため必ず存在させる）${outOfScopeItems.length ? '。「## 対象外（out-of-scope）」節が無ければ追記する（対象外項目は最終レポートの issue 化判断の材料であり、再利用経路でも失われてはならない）' : ''}${optinRecordSection ? '。opt-in テスト記録節を今回の結果へ書き直す' : ''}。既存本文は読まない（取得・補正・1 回の gh pr edit・反映の確認はスクリプトが行い、PR の head・base が ${branch}・${baseBranch} と一致しない PR、取得に失敗した本文・空の本文・Closes 行や対象外節を失う本文では更新しない）。`,
     ...(outOfScopeItems.length ? [`   a. ${writtenFileLines(oosNonce, '対象外節', oosText).join('\n')}`] : []),
-    `   ${outOfScopeItems.length ? 'b. ' : ''}次を実行する（<番号> は再利用する PR の番号）: ${scriptCommand('pr-body-edit.sh', ` ensure <番号> ${item.number}${outOfScopeItems.length ? ` --oos ${oosNonce} ${statePatchSha256(oosNonce, item.number, oosText)}` : ''}${optinRecordSection ? ` --optin${optinRecordArgs(item.optinTests)}` : ''}`)}`,
+    `   ${outOfScopeItems.length ? 'b. ' : ''}次を実行する（<番号> は再利用する PR の番号）: ${scriptCommand('pr-body-edit.sh', ` ensure <番号> ${item.number} ${encodeURIComponent(branch)} ${encodeURIComponent(baseBranch)}${outOfScopeItems.length ? ` --oos ${oosNonce} ${statePatchSha256(oosNonce, item.number, oosText)}` : ''}${optinRecordSection ? ` --optin${optinRecordArgs(item.optinTests)}` : ''}`)}`,
     ...(optinRecordSection
       ? [optinRecordArgsNote('手順 0b2 で控えた期待 SHA（手順 0d で HEAD との一致を確認済み。省略・短縮しない）', '手順 0c の各コマンドの結果 pass / fail / not-run')]
       : []),
@@ -5516,10 +5529,12 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
         // 許可条件を兼ねる。push コマンド成功や sha 変化は根拠にならず（PR #436 P0）、(i) 事前 sha
         // ≠ ローカル HEAD かつ (ii) 事後 sha == ローカル HEAD で判定し、満たさなければ false へ倒す。
         `4. 指摘（手順 2）に対する修正コミットがあれば create-commit スキルに従いコミットする。指摘が「mergeable: CONFLICTING」（base 取り込みのみが必要で、手順 1 の base merge 自体が解消手段だった）で、かつ手順 1 のコンフリクト解消コミット以外に積む修正がない場合は、このコミットは不要（すでに手順 1 で作成済み）。${pushVerifyInstruction(branch)} ${postPushChecksInstruction(String(impl.prNumber))}`,
+        tempFileExcludeLine(),
         commitlintCheckInstruction,
       ]
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
+        tempFileExcludeLine(),
         commitlintCheckInstruction,
         // 次の Review・pr-create は refs/heads/<branch> を見るため、fix のコミットをブランチに載せる
         // までが fix の成果。git branch -f はブランチを別 worktree（Implement の worktree）が
@@ -5898,6 +5913,7 @@ function recoverImplementPrompt(item, brief, branch) {
     ...optinTestExecutionLines(item, '4b'),
     IMPL_STEP5,
     IMPL_STEP6,
+    tempFileExcludeLine(),
     commitlintCheckInstruction,
     '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだ状態で終了する。',
     '   （push と PR 作成は後続の Review が全通過した後に別エージェントが行う）',
