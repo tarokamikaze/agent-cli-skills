@@ -17,6 +17,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -28,14 +29,14 @@ const SCRIPT_PATH = join(
 const DRIVER_MARKER = '__IMPLEMENT_ISSUE_TREE_DRIVER_START__'
 
 const source = readFileSync(SCRIPT_PATH, 'utf8')
-// 状態ファイルへの書き込みの jq の式は同梱スクリプト（scripts/state-write.sh）にある（利用側のリポジトリで観測した権限確認によるランの停止への対応）
-const STATE_WRITE = readFileSync(join(dirname(SCRIPT_PATH), 'state-write.sh'), 'utf8')
+// 状態ファイルの初期化（create）の jq の式は同梱スクリプト（scripts/state.sh）にある（利用側のリポジトリで観測した権限確認によるランの停止への対応）
+const STATE_SH = readFileSync(join(dirname(SCRIPT_PATH), 'state.sh'), 'utf8')
 const markerIndex = source.indexOf(DRIVER_MARKER)
 if (markerIndex < 0) {
   throw new Error(`テスト境界マーカー ${DRIVER_MARKER} が実装スクリプトに存在しない（削除・改名は回帰テストを無効化する）`)
 }
 const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
-const sliceDir = mkdtempSync(join(tmpdir(), 'implement-issue-tree-high-water-defs-'))
+const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'implement-issue-tree-high-water-defs-')))
 const slicePath = join(sliceDir, 'implement-issue-tree-high-water-defs.mjs')
 // 実装スクリプトは `export const meta` 以外の top-level export を持てない（Workflow 起動制約）
 // ため、定義部は非 export のまま置き、切り出したスライス側で export 文を付与する。
@@ -178,13 +179,13 @@ test('配線: remeasureResidualBytesNow の raiseAndPersistHighWater(avgActualBy
   }
 })
 
-test('配線: loadState() の初期 JSON（state-write.sh create）に perWorktreeByteReserveHighWater が含まれる', () => {
-  assert.match(STATE_WRITE, /perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: \$v/)
+test('配線: loadState() の初期 JSON（state.sh create）に perWorktreeByteReserveHighWater が含まれる', () => {
+  assert.match(STATE_SH, /perWorktreeByteReserveHighWater: 0, perWorktreeByteReserveHighWaterVersion: \$v/)
 })
 
 test('配線: loadState() の初期 JSON テンプレートに perWorktreeByteReserveHighWaterVersion が現行版で含まれる（Issue #496）', () => {
   // 版はホストが create の引数で渡す（現行版の定数）
-  assert.match(source, /scriptCommand\('state-write\.sh', ` create \$\{STATE_FILE\} \$\{parent\} \$\{baseBranch\} \$\{concurrency\} \$\{HIGH_WATER_SCHEMA_VERSION\}`\)/)
+  assert.match(source, /scriptCommand\('state\.sh', ` --file \$\{STATE_FILE\} create --base \$\{baseBranch\} --parallel \$\{concurrency\} --version \$\{HIGH_WATER_SCHEMA_VERSION\}`\)/)
 })
 
 test('配線: savedItems 取得が loadState() の分割代入へ変更され highWaterBytes・highWaterVersion を受け取る', () => {
@@ -201,33 +202,16 @@ test('配線: persistedHighWaterBytes が loadedHighWaterBytes で初期化さ�
 
 // --- 3. プロンプト文言テスト ---
 
-test('プロンプト文言: persistPerWorktreeByteReserveHighWater が .items に触れない旨の文言を含む', () => {
-  const idx = source.indexOf('async function persistPerWorktreeByteReserveHighWater')
-  assert.ok(idx >= 0)
-  const fnBody = source.slice(idx, idx + 2500)
-  assert.match(fnBody, /\.items には一切触れない/)
-})
-
-test('プロンプト文言: persistPerWorktreeByteReserveHighWater のプロンプトが version 条件込みの jq 比較式を含む（Issue #496）', () => {
-  const idx = source.indexOf('async function persistPerWorktreeByteReserveHighWater')
-  assert.ok(idx >= 0)
-  const fnBody = source.slice(idx, idx + 3000)
-  assert.match(fnBody, /high-water-max \$\{STATE_FILE\} \$\{bytes\} \$\{HIGH_WATER_SCHEMA_VERSION\}/)
-  // jq の比較式は state-write.sh の high-water-max にある
-  const sub = STATE_WRITE.slice(STATE_WRITE.indexOf('  high-water-max)'))
-  assert.match(sub, /if \(\(\.perWorktreeByteReserveHighWaterVersion \/\/ 0\) != \$v\)/)
-  assert.match(sub, /or \(\(\.perWorktreeByteReserveHighWater \/\/ 0\) < \$hw\) then/)
-  assert.match(sub, /\.perWorktreeByteReserveHighWater = \$hw \| \.perWorktreeByteReserveHighWaterVersion = \$v/)
-})
-
-test('配線: setPerWorktreeByteReserveHighWater が定義され .items に触れない旨の文言を含む（Issue #496）', () => {
-  const idx = source.indexOf('async function setPerWorktreeByteReserveHighWater')
-  assert.ok(idx >= 0)
-  const fnBody = source.slice(idx, idx + 2000)
-  assert.match(fnBody, /\.items には一切触れない/)
-  assert.match(fnBody, /high-water-set \$\{STATE_FILE\} \$\{bytes\} \$\{HIGH_WATER_SCHEMA_VERSION\}/)
-  const sub = STATE_WRITE.slice(STATE_WRITE.indexOf('  high-water-set)'))
-  assert.match(sub, /'\.perWorktreeByteReserveHighWater = \$hw \| \.perWorktreeByteReserveHighWaterVersion = \$v/)
+test('配線: persistPerWorktreeByteReserveHighWater は state.sh hw-max、setPerWorktreeByteReserveHighWater は hw-set を呼び、.items に触れない旨を伝える（Issue #496・#603 第 5 弾）', () => {
+  // 比較式そのもの（version 条件込みの大小比較・無条件の上書き）は scripts/lib/state-lib.sh にあり、tests/state-script.test.mjs が実行して固定する
+  for (const [fn, mode] of [['persistPerWorktreeByteReserveHighWater', 'hw-max'], ['setPerWorktreeByteReserveHighWater', 'hw-set']]) {
+    const idx = source.indexOf(`async function ${fn}`)
+    assert.ok(idx >= 0, fn)
+    const fnBody = source.slice(idx, idx + 3000)
+    assert.match(fnBody, new RegExp(`'${mode}',\\n\\s+\` --bytes \\$\\{bytes\\} --version \\$\\{HIGH_WATER_SCHEMA_VERSION\\}\``))
+    assert.match(fnBody, /\.items には一切触れない/)
+    assert.doesNotMatch(fnBody, /mktemp|jq --/)
+  }
 })
 
 test('配線: ラン開始時の高水位是正（rewriteBytes !== null）が raw 値確定より前に setPerWorktreeByteReserveHighWater を呼ぶ（Issue #496）', () => {

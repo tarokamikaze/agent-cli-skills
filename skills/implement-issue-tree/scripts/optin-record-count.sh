@@ -2,7 +2,7 @@
 # optin-record-count.sh — PR 本文の opt-in テスト実行記録のマーカー行を、現在の HEAD に対して数える読み取り専用スクリプト
 #
 # 使い方（通常は run-verified.sh 経由。ホストがコマンドを組み立てる。カレントディレクトリのリポジトリが対象）:
-#   bash optin-record-count.sh <PR> <コマンド>...
+#   bash optin-record-count.sh [--repo <owner/name>] <PR> <コマンド>...
 #   <コマンド> は opt-in テストのコマンドの空白を %20 にしたもの（ホストが宣言の順に並べる）。
 #
 # 旧プロンプト（マージ前の opt-in 記録の確認）が agent に書かせていた手順を移したもの（Issue #11 の範囲 C）:
@@ -31,10 +31,15 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P) || exit 2
 . "${script_dir}/lib/pr-write.sh" || exit 2
 
 usage() {
-  echo "使い方: optin-record-count.sh PR番号 コマンド..." >&2
+  echo "使い方: optin-record-count.sh [--repo owner/name] PR番号 コマンド..." >&2
   exit 2
 }
 
+if [ $# -ge 2 ] && [ "$1" = --repo ]; then
+  pw_valid_repo "$2" || usage
+  PW_REPO=$2
+  shift 2
+fi
 [ $# -ge 1 ] || usage
 pr=$1
 shift
@@ -45,13 +50,22 @@ for c in "$@"; do
   commands+=("${dec}")
 done
 
-work_dir=$(mktemp -d) || exit 1
-trap 'rm -rf -- "${work_dir}"' EXIT
-j="${work_dir}/j"
-f="${work_dir}/f"
-g="${work_dir}/g"
+# 一時ファイルは 1 つずつ作って 1 つずつ消す（再帰削除を持たない。scripts/ の静的ガードが rm -r を禁じる）
+j=''
+f=''
+g=''
+# shellcheck disable=SC2329  # trap 経由で呼ばれる
+cleanup() {
+  [ -z "${j}" ] || rm -f -- "${j}"
+  [ -z "${f}" ] || rm -f -- "${f}"
+  [ -z "${g}" ] || rm -f -- "${g}"
+}
+trap cleanup EXIT
+j=$(mktemp) || exit 1
+f=$(mktemp) || exit 1
+g=$(mktemp) || exit 1
 
-gh pr view "${pr}" --json body,headRefOid >"${j}" || exit 1
+pw_gh_pr view "${pr}" --json body,headRefOid >"${j}" || exit 1
 H=$(jq -r '.headRefOid // ""' "${j}") || exit 1
 pw_valid_sha "${H}" || exit 1
 jq -r '.body // ""' "${j}" >"${f}" || exit 1

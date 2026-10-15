@@ -12,6 +12,8 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './workflow-script-contract.mjs'
+import { trackTmp } from './tmp-track.mjs'
+import { hashPrecheckReply } from './signed-output.mjs'
 
 export const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
@@ -27,7 +29,7 @@ export const driverPart = source.slice(markerIndex)
  * 実装スクリプトは `export const meta` 以外の top-level export を持てないため、スライス側で export を付ける。
  */
 export async function importDefinitions(names, tag) {
-  const dir = mkdtempSync(join(tmpdir(), `implement-issue-tree-${tag}-`))
+  const dir = trackTmp(mkdtempSync(join(tmpdir(), `implement-issue-tree-${tag}-`)))
   const path = join(dir, 'defs.mjs')
   writeFileSync(path, `${definitionPart}\nexport { ${names.join(', ')} }\n`)
   return import(pathToFileURL(path).href)
@@ -47,10 +49,11 @@ function buildTree(leaves) {
   return nodes
 }
 
-/** テストが渡すスキルディレクトリ（全ランの必須引数。stub agent はスクリプトを実行しないので実在しなくてよい）。 */
-export const STUB_SKILL_DIR = '/opt/skills/implement-issue-tree'
-
-/** 測定スクリプトを使わない最小の引数（残置上限の両軸を無効化する）。 */
+/**
+ * 測定スクリプトを使わない最小の引数（残置上限の両軸を無効化する）。skillDir は dryRun 以外で必須（Issue #603）。
+ * stub agent は測定・観測スクリプトを実行しないため、値は検証を通る形式のダミーでよい。
+ */
+export const STUB_SKILL_DIR = '/repo/.claude/skills/implement-issue-tree'
 export const BASE_ARGS = { parent: 1, parallel: 1, maxResidualWorktrees: 0, maxResidualWorktreeBytes: 0, skillDir: STUB_SKILL_DIR }
 
 /**
@@ -77,6 +80,7 @@ export async function runScript({ args, leaves = [2], override = () => undefined
     if (overridden !== undefined) return overridden
     const n = Number(/#(\d+)/.exec(label)?.[1])
     if (label === 'nonce:seed') return { seedHex: 'b'.repeat(64) }
+    if (label === 'script-hash-precheck') return hashPrecheckReply(prompt)
     if (label === 'worktree:untracked-scan') return { count: 0, paths: [] }
     if (label === 'state:load') return { ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 }
     if (label === 'state:load-verify') return { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
