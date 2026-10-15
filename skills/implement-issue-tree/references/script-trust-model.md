@@ -123,7 +123,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - `external-check-runs.sh`・`review-state-counts.sh`・`checks-state-counts.sh` は、旧コマンドがページごとに出していた JSON の配列（`[{"v":..., "count":...}]`）ではなく、全ページを合算した `<値> <件数>` の行を出す。どの値も agent が読むだけで、ホストの照合・スキーマには渡らない
 - `unresolved-threads.sh` の一覧は、旧手順の GraphQL の生の応答ではなく、未解決スレッドだけの行（`threadId`・`path`・`url`・`author`・`body`）を出す。`body` は `<untrusted-data source="review-comment">` で囲む（ホストの `untrusted()` と同じく、本文中の境界タグに似た文字列は `(untrusted-data)` に置き換える）。agent が返す `unresolvedComments` の形は変えていない
 
-回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする（範囲 D は第 4 弾、範囲 B は第 5 弾で消した）。
+回帰防止は 2 つのテストで行う。`tests/ci-scripts.test.mjs` は、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（fixture に本物の jq を適用する。複数ページも再現する）で同じ入力に対してスクリプトと旧コマンドを実行し、値が一致することを確かめる。`tests/agent-command-shapes.test.mjs` は、開発ファイルの目印 `cmd('...')` が組み立てたコマンドと、プロンプト全文から拾ったコマンドの断片・複数行の塊を `tests/lib/command-shape.mjs`（引用符・`$( )`・ヒアドキュメントを解釈する純 JS の検査器）で検査し、(a)〜(d) に当たるものが、理由付きの既知の例外（範囲 B〜D。マージの安全判定・書き込み・削除で、別の PR で直す）にしか無いことを確かめる。既知の例外は直した PR で消し、最後の PR で空にする（範囲 D は第 4 弾、範囲 B は第 5 弾、範囲 C は第 6 弾で消し、一覧は空になった）。
 
 ## 第 4 弾: worktree・ブランチの削除と終了時の処理（Issue #11 の範囲 D）
 
@@ -142,7 +142,7 @@ payload には**入力の束縛** `inputSha256` を入れる。残置バイト�
 - 削除の安全判定（登録済みの worktree か・メイン worktree とその配下でないか・状態ファイルの保持対象でないか）は、スクリプトが削除の直前に git と状態ファイルから自分で取り直して行い、agent が転記した値を使わない（「測定値の使い方」の (c)）。旧手順では agent が同じ判定をその場で組み立てたシェルで行っていたので、判定を agent の書き方に依存させない分だけ強くなる
 - スクリプトに渡すのは、ホストが `sanitizeWorktreePath`・`isValidBranchName` で検証したパスとブランチ名だけで、スクリプトも同じ規則で検査し直す（不正は exit 2 で何も消さない）。パスは半角スペースを許すため単一引用符で包む（引用符・展開の文字は検証で除外済み）
 - スイープの候補一覧は、agent が Write ツールで `<状態ファイル>.sweep-<nonce>.json` に書き、スクリプトが `SHA-256(nonce + 改行 + sweep + 改行 + 内容)`（ホストの `statePatchSha256(nonce, 'sweep', 一覧)`）を照合してから使う。写し間違い・別の呼び出しの一覧の流用は、何かを消す前に止まる。候補ファイルは成否・引数の誤りに関わらず消す
-- 迷ったら消さない: `git rev-parse --show-toplevel` が失敗したら `rm -rf` しない、`git worktree list` を取れなければ何も消さない、`discard-safety.sh` は `git worktree list` が失敗したら `DIRTY true`（ホストは削除しない）
+- 迷ったら消さない: `git rev-parse --show-toplevel` が失敗したら `rm -rf` しない、メイン worktree の配下は cwd の toplevel だけでなく `git worktree list` の先頭の実パスでも判定する（リンク worktree の中から起動されても配下を消さない。その実パスを取れなければ `rm -rf` しない）、`git worktree list` を取れなければ何も消さない、`discard-safety.sh` は `git worktree list` が失敗したら `DIRTY true`（ホストは削除しない）
 - agent が転記する値（`REMOVED` の行・`dirty`）の扱いは旧手順と同じ。`dirty` は Recover の `wipCommitted` の申告とあわせた 2 層の削除ゲートの片方で、旧手順でも agent の観測の転記だった。スクリプトにしたことで、観測のコマンドを agent が書き間違える余地が無くなる
 - 独立した検証として、`tests/cleanup-scripts.test.mjs` が実際の git で一時リポジトリと worktree を作り、旧プロンプトのシェル（テスト内に固定文字列で持つ）とスクリプトを同じ構成のリポジトリに流して、残ったファイル・`git worktree list`・ブランチが一致することを確かめる。対象は通常・locked・`.git` が壊れて `rm -rf` へ進むもの・未登録・実体の無い登録・メイン worktree の配下・実パスがメイン worktree になるシンボリックリンク・未コミットの変更・半角スペースを含むパス・状態ファイルの保持対象（failed / blocked / monitoring）。ホストが組み立てたコマンド（引用・照合値）をそのままスクリプトが受け付けることも同じテストで流して確かめる
 
@@ -173,6 +173,41 @@ merge-exec の手順 2b（G0 ゲート: ベースブランチのサーバー側�
 - (i) の直後に、旧手順に無い判定 (i-a) `required-status-check-contexts`（必須の context〔重複なし・空でない文字列〕の件数）を足した（Issue #15）。0 件・取得の失敗は server-enforcement-missing。旧手順は、`required_status_checks` のルールはあるが必須の context が 0 件で、HEAD に check-run も commit status も無い構成で (v) と (v-b) が 0 件どうしになり pass にしていた。必須のチェックが 1 件も無いとサーバー側の強制は何も見ていないので、マージしない側に倒す。(i) の拡張にしないのは、(i) の不合格は classic branch protection の経路（classic-unsupported）を表し、こちらは ruleset の経路で強制を確認できない場合で reason が違うため。(i) の直後に置くのは、ruleset の取得や HEAD のチェックの取得の前に止められ、(i-b) 以降はどれも同じ server-enforcement-missing なので、ほかの構成の verdict を変えないため
 
 回帰防止は `tests/g0-check.test.mjs` で行う。旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`tests/lib/fake-gh.sh`。ruleset と App ID の応答も返す）で同じ入力に対して旧コマンドを実行し、旧プロンプトの判定の手順どおりに読んだ行と verdict が、スクリプトの出力とバイト単位で一致することを、合格・各判定の不合格・各取得の失敗・引用符と非 ASCII を含む context の各場合で確かめる。(i-a) の行は旧手順に無いので、必須の context が 1 件以上の構成では旧手順の出力の (i) の行の直後にこの行を挟んだものと比べる。必須の context が 0 件・取得できない構成は旧手順と意図して結果を変えるので、旧手順の verdict を記録として確かめたうえで、新しい出力を別のケース（`DIVERGENT_CASES`）で固定する。`/bin/bash`（3.2）と Homebrew の bash の両方で走る。
+
+## 第 6 弾: PR 本文・コメント・resolve の書き込み（Issue #11 の範囲 C）
+
+PR 作成・fix・Low 指摘のコメント・opt-in 記録の確認の agent に書かせていた、PR 本文（未信頼の自由文）を扱うシェル（`f=$(mktemp)`・`grep || { echo; echo; echo; }`・`grep -avE ... ; rc=$?; ... && mv`・`pass=$(grep -cxF ...); rc=$?`・HEREDOC・`gh pr edit --body-file`）と、`{}` と引用符が同居する resolve の mutation を、同梱スクリプトへ移した。
+
+| スクリプト | 置き換えた手順 | 出力 |
+|------------|----------------|------|
+| `pr-body-edit.sh ensure` | PR 作成の手順 1c（既存 PR の再利用時の本文の補正: Closes 行・対象外節・opt-in 記録節） | `OK`、失敗は標準エラーの `FAILED: <理由>` と exit 1 |
+| `pr-body-edit.sh optin` | fix の手順 4b（opt-in 記録節の書き直し） | 同上 |
+| `pr-body-edit.sh oos-append` | fix の手順 6（対象外の指摘の記録） | 同上 |
+| `optin-record-count.sh` | マージ前の opt-in 記録の確認（本文の正規化と `grep -cxF` の 3 本） | `HEAD <sha>` と `COUNT <index> <pass> <nonPass>` の行（旧手順と同じ件数）。取得失敗は何も出さず exit 1 |
+| `pr-comment.sh` | 最終 Review の Low 指摘のコメント（`--body "$(cat <<'LOWEOF' ...)"`） | `gh pr comment` の出力 |
+| `resolve-thread.sh` | fix の手順 5（resolve の GraphQL mutation） | `gh api graphql` の出力と終了コード |
+
+未信頼の自由文の扱い:
+
+- コマンド行にも HEREDOC にも載せない。ホストが内容を知っている自由文（Low 指摘のコメント本文・PR 作成時の対象外節）は、`state-write.sh` の patch と同じ形にした。agent が Write ツールでカレントディレクトリの `.implement-issue-tree-<nonce>.md` に書き、スクリプトが自分の一時ファイルへ写してから `SHA-256(nonce + 改行 + 束縛先 + 改行 + 内容〔末尾の改行を除く〕)` をホストの渡した値と照合し、一致したときだけ使う（束縛先はコメントなら PR 番号、対象外節なら issue 番号）。ファイルは成否に関わらず消す。nonce は内容から導出し（`fileNonce`）、プロンプトでのデータ境界のトークンにも使う（内容に自分自身のハッシュを含めることはできないので、境界を偽装できない）
+- fix が自分で書く対象外の行は、ホストが内容を知らないので照合値が無い。`oos-append` は代わりに行の形（`- [threadId: <threadId>] <本文>`・20 行以内・1 行 2000 バイト以内）と、threadId がホストの渡した未解決スレッドの一覧にあることを確かめる。GitHub の closing keyword の形（`close` / `fix` / `resolve` の活用形の後に `#N`・`owner/repo#N`・Issue の URL。大文字小文字を問わない）を含む行は書き込まない（PR のマージ時に無関係な Issue を閉じさせられるため）
+- ホストは照合値と nonce を、スクリプトと同じく内容の末尾の改行を除いてから計算する（除かないと、末尾が改行になる内容〔指摘が空のコメントなど〕は必ず不一致になる）
+- agent が Write したあとにスクリプトを起動できなかった経路（hook の拒否・中断）では、`.implement-issue-tree-<nonce>.md` が worktree のルートに残りうる。コミットを作る手順（Implement・recover-implement・fix と、PR 作成・fix の base 取り込みの解消）は、`git add` の前に `rm -f -- .implement-issue-tree-*.md` で消してからコミットする（`WRITTEN_FILE_COMMIT_GUARD`）
+- 既存の PR 本文はスクリプトの中だけで扱い、agent のコンテキストに入れない。opt-in テストのコマンドは空白を `%20` にして引数で渡す（ホストの許可文字集合に引用符・`$`・`%` は無い）
+
+本文の全文を置き換える書き戻しは fail-closed にした: 取得の失敗・補正後が空・取得した本文にあった `Closes #` の行や対象外の見出しが補正後に無い、のいずれかなら `gh pr edit` を呼ばない。書き戻したあとは本文を取り直し、足したもの（Closes 行・対象外の見出しと各 threadId・記録節の各マーカー行）があることを確かめ、無ければ失敗を返す。
+
+信頼の水準は旧プロンプトと同じで、変えていない。照合値は写し間違い・流用の検出であって、悪意のある agent への認証ではない（第 2 弾と同じ）。マージ前の opt-in 記録の判定は、旧手順と同じくホストの `classifyOptinRecordGate` と `combineOptinRecordGate`（ホストが保持する直近の fix の実測を重ねる）が行う。
+
+旧手順と違う点（互換性の注記）:
+
+- opt-in 記録節の書き直しで、除去後に空白以外の文字が残らない本文も失敗にした（旧手順は `[ -s "$g" ]` だけで、`gh` の出力の末尾の改行が残るため、記録節だけの本文を空行 1 つに置き換え得た）
+- PR 作成の手順 1c の取得は `--jq '.body // ""'` にした（旧手順は `--jq .body` で、本文が null のとき `null` の文字列を本文として扱い得た）。null 以外では同じ
+- PR 作成の手順 1c も、書き戻したあとに反映を確かめる（旧手順は fix の手順 4b・6 だけが確かめていた）
+- 対象外節の追記は旧手順では agent に任せていた形を、`ensure` は空行 1 つと節、`oos-append` は節の末尾（次の見出しの手前）への行の追加に固定した
+- `resolve-thread.sh` は threadId を `-f`（文字列）で渡す（旧手順の `-F` は数値・真偽値に見える値を型変換する）。mutation は同じ
+
+回帰防止: `tests/write-scripts.test.mjs` が、旧プロンプトのコマンドを固定文字列で持ち、偽の gh（`pr edit` は `--body-file` の内容で本文を置き換え、`pr comment` は本文を記録する）で同じ入力に対して旧コマンドとスクリプトを実行し、書き戻した本文・投稿した本文・件数・mutation が一致することと、照合・fail-closed の分岐を確かめる。ホストのプロンプトから Write する内容とコマンドを取り出して流す確認も含む。
 
 ## 関連
 

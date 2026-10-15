@@ -23,6 +23,8 @@
 # 旧手順より厳しくした点（どれも「消さない」側。消す場合の判定は変えていない）:
 #   - パス・ブランチ名の形式をホストの sanitizeWorktreePath・isValidBranchName と同じ規則で検査し直す（不正は exit 2）
 #   - git rev-parse --show-toplevel が失敗したら rm -rf しない（旧手順は "$main"/* が /* になり、結果として同じく消さなかった）
+#   - porcelain の先頭エントリの実パスの配下も消さない（toplevel は cwd に依存し、リンク worktree の中から起動されると
+#     メイン worktree の配下を守れないため）。その実パスを取れないときも rm -rf しない
 #   - git worktree list の取得に失敗したら何も消さない
 #   - porcelain の先頭エントリは、旧 state:cleanup の awk '{print $2}'（空白で切れる）ではなく sweep と同じ接頭辞の除去で読む
 #
@@ -113,11 +115,15 @@ safe_rm() {
   [ -n "${main_wt}" ] && main_wt_real=$(real_dir "${main_wt}")
   [ -z "${target}" ] && return 10
   [ -z "${main}" ] && return 11
+  # porcelain の先頭（メイン worktree）の実パスを取れないときも消さない（下の配下の判定ができないため）
+  [ -z "${main_wt_real}" ] && return 11
   if [ "${target}" = "${main}" ] || [ "${target}" = "${main_wt_real}" ]; then
     return 11
   fi
+  # 配下の判定は、cwd の toplevel（main）と porcelain の先頭の実パス（main_wt_real）の両方で行う。toplevel は cwd に依存し、
+  # リンク worktree の中から起動されるとその worktree を指すため、それだけではメイン worktree の配下を守れない
   case "${target}" in
-    "${main}"/*) return 11 ;;
+    "${main}"/* | "${main_wt_real}"/*) return 11 ;;
   esac
   rm -rf -- "${p}" || return 12
   return 0

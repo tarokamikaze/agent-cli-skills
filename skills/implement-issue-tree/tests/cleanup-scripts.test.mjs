@@ -355,6 +355,44 @@ for (const bash of BASHES) {
     }
   })
 
+  // cwd の git rev-parse --show-toplevel はリンク worktree を指すので、メイン worktree の配下の判定は porcelain の先頭の実パスでも行う。
+  // 旧シェルは toplevel だけで判定していたため、リンク worktree の中から起動されるとメイン worktree の配下を消していた（強化した点）
+  test(`${tag} worktree-cleanup.sh: リンク worktree の中から起動されても、メイン worktree の配下は消さない（remove・sweep）`, () => {
+    const kinds = { l: 'clean', f: 'nested-broken', d: 'broken' }
+    const oldRepo = makeRepo(kinds)
+    const newRepo = makeRepo(kinds)
+    const inLinked = (repo, script, args) => spawnSync(bash, [join(SCRIPTS, script), ...args], { cwd: repo.paths.l, encoding: 'utf8' })
+    try {
+      // 旧シェルは同じ条件でメイン worktree の配下を消す（この差を閉じたことの確認）
+      const o = spawnSync(bash, ['-c', OLD_CLEANUP, 'old', oldRepo.paths.f], { cwd: oldRepo.paths.l, encoding: 'utf8' })
+      assert.equal(o.status, 0, o.stderr)
+      assert.equal(snapshot(oldRepo).kinds.f, 'none')
+
+      let r = inLinked(newRepo, 'worktree-cleanup.sh', ['remove', newRepo.paths.f])
+      assert.equal(r.status, 1, r.stderr)
+      assert.equal(r.stdout, `REFUSED ${newRepo.paths.f}\n`)
+      assert.equal(snapshot(newRepo).kinds.f, 'dir')
+
+      // sweep: 状態ファイルと候補ファイルはリンク worktree の cwd からの相対パスで置く
+      mkdirSync(join(newRepo.paths.l, '_', 'issue-trees'), { recursive: true })
+      writeFileSync(join(newRepo.paths.l, STATE), JSON.stringify({ parent: 1, items: {} }))
+      const json = JSON.stringify([newRepo.paths.f, newRepo.paths.d])
+      writeFileSync(join(newRepo.paths.l, `${STATE}.sweep-${NONCE}.json`), `${json}\n`)
+      r = inLinked(newRepo, 'worktree-cleanup.sh', ['sweep', STATE, NONCE, sha256(`${NONCE}\nsweep\n${json}`)])
+      assert.equal(r.status, 0, r.stderr)
+      const lines = r.stdout.trimEnd().split('\n')
+      assert.ok(lines.includes(`SKIPPED refused ${newRepo.paths.f}`), r.stdout)
+      assert.ok(lines.includes(`REMOVED ${newRepo.paths.d}`), 'メイン worktree の配下でないものは従来どおり消す')
+      const after = snapshot(newRepo)
+      assert.equal(after.kinds.f, 'dir')
+      assert.equal(after.kinds.d, 'none')
+      assert.ok(after.mainFiles.includes('a.txt'))
+    } finally {
+      oldRepo.done()
+      newRepo.done()
+    }
+  })
+
   test(`${tag} worktree-cleanup.sh remove: メイン worktree 自身は消さない。半角スペースを含むパスを扱える。形式の誤りは exit 2`, () => {
     const repo = makeRepo({ 'w x': 'clean' })
     try {
