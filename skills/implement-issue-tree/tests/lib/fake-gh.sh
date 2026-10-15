@@ -8,6 +8,7 @@
 #   --paginate なしなら 1 ページ目だけを使う。--slurp のときはページの配列をそのまま出す（1 ページの fixture は [ページ]）。
 # 呼び出しは $FAKE_GH_DIR/calls.log に 1 行ずつ残す。$FAKE_GH_DIR/err-<key> があれば、その内容を標準エラーへ出して exit 1。
 # $FAKE_GH_DIR/rc-<key> があれば、出力したあとその内容の終了コードで終わる（gh pr checks の pending = 8 など）。
+# pr edit・pr comment は fixture を読まず書き込みを再現する（下の case の説明）。
 d=$FAKE_GH_DIR
 jqf=''
 paginate=0
@@ -51,6 +52,37 @@ case "${args[0]} ${args[1]}" in
   'pr checks') key="prchecks-${args[2]}" ;;
   'issue view') key="view-${args[2]}" ;;
   'pr view') key="prview-${args[2]}" ;;
+  'pr edit' | 'pr comment')
+    # 書き込み（write-scripts.test.mjs・optin-tests-gate.test.mjs）。pr edit は --body-file の内容で prview-<N>.json の body を
+    # 置き換え（$FAKE_GH_DIR/noop-predit-<N> があれば置き換えずに成功だけ返す）、pr comment は本文を comment-<N>.md に書く
+    k="pr${args[1]}-${args[2]}"
+    if [ -f "$d/err-$k" ]; then
+      printf '%s\n' "$(cat "$d/err-$k")" >&2
+      exit 1
+    fi
+    src=''
+    i=0
+    while [ "$i" -lt "${#args[@]}" ]; do
+      case "${args[$i]}" in
+        --body-file) src=$(cat "${args[$((i + 1))]}") || exit 1 ;;
+        --body) src=${args[$((i + 1))]} ;;
+      esac
+      i=$((i + 1))
+    done
+    if [ "${args[1]}" = comment ]; then
+      printf '%s' "$src" >"$d/comment-${args[2]}.md"
+      echo "https://example.invalid/pull/${args[2]}#issuecomment-1"
+      exit 0
+    fi
+    [ -f "$d/noop-$k" ] && exit 0
+    # --body-file の内容をそのまま（末尾の改行も含めて）本文にする
+    prev=''
+    for a in "${args[@]}"; do
+      [ "$prev" = --body-file ] && jq --rawfile b "$a" '.body = $b' "$d/prview-${args[2]}.json" >"$d/.edit.json" && mv "$d/.edit.json" "$d/prview-${args[2]}.json"
+      prev=$a
+    done
+    exit 0
+    ;;
   api\ repos/*)
     p=${args[1]#repos/\{owner\}/\{repo\}/}
     case "$p" in

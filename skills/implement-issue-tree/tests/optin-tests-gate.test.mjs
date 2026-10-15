@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -33,7 +33,6 @@ const SLICE_EXPORTS = [
   'restoreOptinFixState',
   'renderOptinRecordSection',
   'optinRecordMarkerLine',
-  'optinRecordRewriteLines',
   'optinRecordUpdateInstructions',
   'classifyOptinRecordGate',
   'combineOptinRecordGate',
@@ -71,7 +70,6 @@ const {
   restoreOptinFixState,
   renderOptinRecordSection,
   optinRecordMarkerLine,
-  optinRecordRewriteLines,
   optinRecordUpdateInstructions,
   classifyOptinRecordGate,
   combineOptinRecordGate,
@@ -661,13 +659,16 @@ test('optinTestExecutionLines: pr-create 以外の呼び出し（implement / rec
   }
 })
 
-test('optinRecordVerifyPrompt: gh pr view --json body,headRefOid を単一呼び出しで取得し、本文転記禁止・headRefOid 検証・件数のみ返却の指示を含む（PR #503 3 巡目 codex P1）', () => {
-  const p = optinRecordVerifyPrompt(item, impl, ['make e2e'])
-  assert.match(p, /gh pr view 123 --json body,headRefOid/)
-  assert.match(p, /\^\[0-9a-f\]\{40\}\$/)
-  assert.match(p, /表示・転記しない/)
+test('optinRecordVerifyPrompt: 本文と headRefOid の取得・件数の数え上げを optin-record-count.sh に任せ、本文を読まず件数と headRefOid だけを返す指示を含む（PR #503 3 巡目 codex P1・Issue #11）', () => {
+  const p = optinRecordVerifyPrompt(item, impl, ['make e2e', 'cargo test -- --ignored'])
+  // 取得（gh pr view 123 --json body,headRefOid の 1 回）と headRefOid の形式検証はスクリプトが行う（tests/write-scripts.test.mjs）
+  assert.match(p, /optin-record-count\.sh 123 make%20e2e cargo%20test%20--%20--ignored/)
+  assert.match(p, /40 桁の小文字 16 進でない/)
+  assert.match(p, /fetchFailed: true・headRefOid: ""・counts: \[\]/)
+  assert.match(p, /本文の内容・要約・引用はコンテキストにも返却値にも含めない/)
   assert.match(p, /counts/)
   assert.match(p, /headRefOid/)
+  assert.doesNotMatch(p, /grep -cxF|[jfg]=\$\(mktemp\)/)
 })
 
 test('mergeExecutePrompt に optin 関連文字列と --json body が含まれない（分離契約の非退行。expectedHeadSha 指定時も同様）', () => {
@@ -703,10 +704,10 @@ test('fixPrompt: pushAfterFix=true かつ optinTests 宣言ありでは再実行
   assert.match(p, /"make e2e"/)
   assert.match(p, /偽装/)
   assert.match(p, /optinTestRuns/)
-  // PR 本文の既存マーカー行を除去してから記録節を書き直す指示（陳腐化した pass の残存防止）。
-  assert.match(p, new RegExp(OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  // PR 本文の既存マーカー行を除去してから記録節を書き直す指示（陳腐化した pass の残存防止）。除去・追記・gh pr edit・
+  // 反映の確認は pr-body-edit.sh optin が行う（Issue #11。実行は tests/write-scripts.test.mjs）。
+  assert.match(p, /pr-body-edit\.sh optin 123 <sha> <results> make%20e2e/)
   assert.match(p, /pushed: true と確認できた場合のみ実行する/)
-  assert.match(p, /gh pr edit 123 --body-file/)
 })
 
 test('fixPrompt: pushAfterFix=true でも optinTests が空なら出力は無変更（R3 と同じ既定無効方針）', () => {
@@ -719,6 +720,7 @@ test('fixPrompt: pushAfterFix=false（push 前 Review ループ）では optinTe
   const p = fixPrompt({ ...item, optinTests: ['make e2e'] }, impl, finding, false)
   assert.doesNotMatch(p, /optinTestRuns/)
   assert.doesNotMatch(p, new RegExp(OPTIN_RECORD_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.doesNotMatch(p, /pr-body-edit\.sh/)
 })
 
 // ---------------------------------------------------------------------------
@@ -788,23 +790,18 @@ test('実行レベル: 新旧 2 つの sha の記録が併存しても現在の 
 })
 
 // ---------------------------------------------------------------------------
-// 群 F2: 記録節の書き直し（Issue #502）。optinRecordRewriteLines が出力する grep -avE 除去
-// 実行行（判定と mv まで 1 行で完結）と固定テンプレートの HEREDOC 追記をそのまま bash で実行し、
+// 群 F2: 記録節の書き直し（Issue #502）。書き直しは pr-body-edit.sh optin が行う（Issue #11 で agent に
+// 書かせていた grep -avE と mv の連結・HEREDOC の追記をスクリプトへ移した。旧コマンドと結果が同じことは
+// tests/write-scripts.test.mjs が確かめる）。偽の gh（tests/lib/fake-gh.sh）の PR 本文に対して実行し、
 // 2 回更新しても見出しが 1 個・古い sha の行が 0 行・Closes 行が保持されること、除去後が空に
-// なる場合は "$f" が元のまま残ることを確認する。
+// なる場合は本文を更新しないことを確認する。
 // ---------------------------------------------------------------------------
 
 const SHA_C = 'c'.repeat(40)
+const SCRIPTS_DIR = dirname(SCRIPT_PATH)
+const FAKE_GH = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'lib', 'fake-gh.sh'), 'utf8')
+const JQ_DIR = dirname(execFileSync('/usr/bin/which', ['jq'], { encoding: 'utf8' }).trim())
 
-// 除去実行行の期待字面（ホスト定数のみから成る行頭・行末アンカー付き ERE 3 本。PR #505 codex P1）。
-const EXPECTED_REMOVE_GREP = `grep -avE -e '^[[:space:]]*## opt-in テスト実行記録[[:space:]]*$' -e '^[[:space:]]*<!-- optin-test-record: [^ ]+ [^ ]+ .+ -->[[:space:]]*$' -e '^[[:space:]]*- opt-in テスト結果: .+ => [^ ]+[[:space:]]*$'`
-
-// プロンプト中の除去実行行と HEREDOC（字下げなしで示される）をそのまま取り出し、エージェントが
-// 行うのと同じく <sha>/<result> を字面で置き換えてから実行する。実行行は補完せず単独の bash
-// 呼び出しで実行し（シェル変数は呼び出しを跨いで残らない）、その終了コードが 0 以外なら
-// HEREDOC 追記へ進まず status 3 で失敗させる（プロンプトの fail-closed 指示と同じ分岐）。
-// env を渡すと子 bash の環境を差し替える（PATH を /usr/bin 先頭に固定して、macOS では BSD grep
-// 〔/usr/bin/grep〕で実行行を実際に走らせる確認に使う。PR #505 codex P1）。
 function applyRecordRewrite(bodyText, commands, sha, result, env) {
   const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
   const bodyPath = join(dir, 'body.md')
@@ -812,22 +809,31 @@ function applyRecordRewrite(bodyText, commands, sha, result, env) {
   return runRecordRewrite(bodyPath, commands, sha, result, env)
 }
 
+// bodyPath の内容を PR #123 の本文として偽の gh に置き、pr-body-edit.sh optin を実行する。成功したら書き戻された本文を
+// bodyPath へ写して返す。失敗（非 0）は status 3 の例外にし、bodyPath は変えない。
+// env を渡すと PATH を差し替える（/usr/bin 先頭に固定して、macOS では BSD grep〔/usr/bin/grep〕で除去を実際に走らせる
+// 確認に使う。PR #505 codex P1。偽の gh が使う jq の場所は後ろに足す）。
 function runRecordRewrite(bodyPath, commands, sha, result, env = process.env) {
-  const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
-  const grepLine = lines.find((l) => l.trim().startsWith('g=$(mktemp); grep -avE')).trim()
-  const hs = lines.indexOf(`cat >> "$f" <<'OPTIN_RECORD_EOF'`)
-  const he = lines.indexOf('OPTIN_RECORD_EOF', hs + 1)
-  assert.ok(hs >= 0 && he > hs, 'HEREDOC テンプレートが行頭インデントなしで見つからない')
-  const heredoc = lines.slice(hs, he + 1).join('\n')
-    .replaceAll('<sha>', sha).replaceAll('<result>', result)
-  const rm = spawnSync('bash', ['-c', `f="$1"\n${grepLine}\n`, 'bash', bodyPath], { env })
-  if (rm.status !== 0) {
-    const err = new Error(`除去実行行が終了コード ${rm.status} で失敗`)
+  const dir = dirname(bodyPath)
+  const bin = join(dir, 'bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'gh'), FAKE_GH)
+  chmodSync(join(bin, 'gh'), 0o755)
+  writeFileSync(join(dir, 'prview-123.json'), JSON.stringify({ body: readFileSync(bodyPath, 'utf8') }))
+  writeFileSync(join(dir, 'calls.log'), '')
+  const args = ['optin', '123', sha, commands.map(() => result).join(','), ...commands.map((c) => c.replaceAll(' ', '%20'))]
+  const r = spawnSync('bash', [join(SCRIPTS_DIR, 'pr-body-edit.sh'), ...args], {
+    cwd: dir, encoding: 'utf8', env: { ...env, PATH: `${bin}:${env.PATH}:${JQ_DIR}`, FAKE_GH_DIR: dir },
+  })
+  if (r.status !== 0) {
+    const err = new Error(`pr-body-edit.sh が終了コード ${r.status} で失敗: ${r.stderr}`)
     err.status = 3
     throw err
   }
-  execFileSync('bash', ['-c', `f="$1"\n${heredoc}\n`, 'bash', bodyPath], { env })
-  return readFileSync(bodyPath, 'utf8')
+  assert.equal(r.stdout, 'OK\n')
+  const out = JSON.parse(readFileSync(join(dir, 'prview-123.json'), 'utf8')).body
+  writeFileSync(bodyPath, out)
+  return out
 }
 
 test('記録節の書き直し: 2 回更新しても見出しは 1 個・古い sha の行は 0 行・Closes 行と他の本文は保持される（Issue #502）', () => {
@@ -858,21 +864,16 @@ test('記録節の書き直し: 字下げ・CRLF 付きの旧記録行も固定�
   assert.match(out, /Closes #42/)
 })
 
-test('記録節の書き直し: 本文が記録節だけ（除去後に空）の場合は実行行が非 0 で終わり "$f" は元のまま残る（fail-closed。Issue #502）', () => {
+test('記録節の書き直し: 本文が記録節だけ（除去後に空）の場合はスクリプトが非 0 で終わり、本文を更新しない（fail-closed。Issue #502）', () => {
   const commands = ['make e2e']
   const onlyRecord = `${OPTIN_RECORD_HEADING}\n${OPTIN_RECORD_HUMAN_PREFIX}make e2e => pass\n${optinRecordMarkerLine(SHA_A, 'pass', 'make e2e')}\n`
   const dir = mkdtempSync(join(tmpdir(), 'optin-record-rewrite-'))
   const bodyPath = join(dir, 'body.md')
   writeFileSync(bodyPath, onlyRecord)
   assert.throws(() => runRecordRewrite(bodyPath, commands, SHA_B, 'pass'), (e) => e.status === 3)
-  // mv されず、HEREDOC 追記にも進まない（本文は 1 バイトも変わらない）。
-  assert.equal(readFileSync(bodyPath, 'utf8'), onlyRecord)
-  const lines = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
-  // 判定と mv は実行行そのものに字面で含まれ、散文の読解に依存しない。
-  assert.ok(lines[0].trim().endsWith('"$f" > "$g"; rc=$?; [ "$rc" -eq 0 ] && [ -s "$g" ] && mv "$g" "$f"'))
-  const text = lines.join('\n')
-  assert.match(text, /この行の終了コードが 0 でない場合/)
-  assert.match(text, /mv も gh pr edit もせず/)
+  // gh pr edit を呼ばず、PR 本文は 1 バイトも変わらない。
+  assert.equal(JSON.parse(readFileSync(join(dir, 'prview-123.json'), 'utf8')).body, onlyRecord)
+  assert.ok(!readFileSync(join(dir, 'calls.log'), 'utf8').includes('pr edit'))
 })
 
 test('記録節の書き直し: 通常本文は 1 回の実行行 + 追記で Closes 行が残り、見出し 1 個・古い sha の行 0 行になる（Issue #502）', () => {
@@ -885,29 +886,25 @@ test('記録節の書き直し: 通常本文は 1 回の実行行 + 追記で Cl
   assert.deepEqual(grepShaResultCounts(lines.join('\n'), SHA_B, 'make e2e'), { pass: 1, nonPass: 0 })
 })
 
-test('記録節の書き直し: テンプレートは固定形式の行のみで、補足（任意テキスト）・nonce・完全一致削除ゲート・printf/echo 埋め込みを含まない（Issue #502）', () => {
-  const commands = ['make e2e']
-  const rewrite = optinRecordRewriteLines(commands, 'sha', 'result', 'fail')
-  const hs = rewrite.findIndex((l) => l.trim() === `cat >> "$f" <<'OPTIN_RECORD_EOF'`)
-  const he = rewrite.findIndex((l, i) => i > hs && l.trim() === 'OPTIN_RECORD_EOF')
-  assertFixedFormRecordLines(rewrite.slice(hs + 1, he).map((l) => l.trim()), commands)
+test('記録節の書き直し: 追記する記録節は固定形式の行のみで、補足（任意テキスト）を含まない。プロンプトは本文を扱うシェルを書かせない（Issue #502・#11）', () => {
+  const commands = ['make e2e', 'cargo test -- --ignored']
+  const out = applyRecordRewrite('Closes #42\n', commands, SHA_B, 'pass').split('\n')
+  const hs = out.indexOf(OPTIN_RECORD_HEADING)
+  assert.ok(hs > 0)
+  assert.deepEqual(out.slice(hs).filter((l) => l !== ''), [
+    OPTIN_RECORD_HEADING,
+    ...commands.flatMap((c) => [`${OPTIN_RECORD_HUMAN_PREFIX}${c} => pass`, optinRecordMarkerLine(SHA_B, 'pass', c)]),
+  ])
   const update = optinRecordUpdateInstructions({ ...item, optinTests: commands }, impl, '4b').join('\n')
   const pr = prCreatePrompt({ ...item, optinTests: commands }, impl, [])
-  for (const text of [rewrite.join('\n'), update]) {
-    assert.doesNotMatch(text, /nonce/i)
-    assert.doesNotMatch(text, /grep -c?xF/)
-    assert.doesNotMatch(text, /\bcmp\b|\bdiff\b/)
-    assert.doesNotMatch(text, /printf|echo /)
-    assert.doesNotMatch(text, /- 補足:/)
-    assert.ok(text.includes(EXPECTED_REMOVE_GREP), '除去実行行が行全体の形式に一致する固定パターン 3 本の grep -avE でない')
-    assert.doesNotMatch(text, /grep -a?vF/)
+  const args = '<sha> <results> make%20e2e cargo%20test%20--%20--ignored'
+  for (const text of [update, pr]) {
+    assert.ok(text.includes(args), 'prCreatePrompt の再利用経路・fixPrompt 経路が同じ引数で書き直しをスクリプトに任せる')
+    assert.doesNotMatch(text, /grep -a?vE|grep -c?xF|OPTIN_RECORD_EOF|[fg]=\$\(mktemp\)|--body-file "\$f"/)
+    assert.doesNotMatch(text, /- 補足:|OPTIN_NONCE/)
   }
-  // prCreatePrompt の再利用経路・fixPrompt 経路が同じ書き直し手順を共有する。
-  assert.ok(pr.includes(rewrite[0]) && update.includes(rewrite[0]))
-  assert.doesNotMatch(pr, /- 補足:|OPTIN_NONCE/)
-  // 本文は従来どおりファイル経由（取得 → 加工 → --body-file）。
-  assert.match(update, /gh pr view 123 --json body --jq '\.body \/\/ ""' > "\$f"/)
-  assert.match(update, /gh pr edit 123 --body-file "\$f"/)
+  assert.match(update, /pr-body-edit\.sh optin 123 /)
+  assert.match(pr, /pr-body-edit\.sh ensure <番号> 42 --optin /)
 })
 
 test('記録節の書き直し: 除去パターンの元になる 3 定数は ERE メタ文字・単一引用符を含まない（エスケープ不要の前提を固定。PR #505 codex P1）', () => {
