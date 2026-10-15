@@ -225,33 +225,12 @@ test('目印を付けたコマンドのヒアドキュメントは、許可し�
 
 // --- 静的な走査 ---
 
-// まだ直していない範囲（Issue #11 の範囲 C。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に、
-// 範囲 D〔削除と終了時の処理〕は worktree-cleanup.sh・discard-safety.sh に移して一覧から消した）。直した PR で項目を消し、
-// 最後の PR で一覧を空にする。
-// match は検出した断片（extractCommandCandidates の 1 行の切り出し、または extractCommandBlocks の複数行の塊）に当てる正規表現
-const KNOWN_EXCEPTIONS = [
-  {
-    range: 'C',
-    where: 'prCreatePrompt 手順 1c（既存 PR の本文への Closes 行の追記）',
-    rules: ['c'],
-    match: /^grep -qF "Closes #\d+" "\$f" \|\| \{ echo; echo; echo "Closes #\d+"; \} >> "\$f"$/,
-    reason: 'PR 本文（未信頼の自由文）の書き込み。Write ツールでファイルに書き、スクリプトが SHA-256 を照合してから使う形へ移す（範囲 C の PR）',
-  },
-  {
-    range: 'C',
-    where: 'optinRecordRewriteLines（opt-in テスト記録の節の書き直し）',
-    rules: ['c'],
-    match: /^rc=\$\?; \[ "\$rc" -eq 0 \] && \[ -s "\$g" \] && mv "\$g" "\$f"$/,
-    reason: 'PR 本文の書き込み（opt-in 記録のゲート）。範囲 C の PR で書き込みごとスクリプトへ移す',
-  },
-  {
-    range: 'C',
-    where: 'optinRecordVerifyPrompt（opt-in テスト記録の件数の確認）',
-    rules: ['c'],
-    match: /^pass=\$\(grep -cxF -- "PLACEHOLDER" "\$g"\); rc=\$\?\nfail=/,
-    reason: 'opt-in 記録のゲート（PR 本文の読み取りと正規化）。書き込み側と同じ範囲 C の PR で移す',
-  },
-]
+// まだ直していない範囲の既知の例外（Issue #11）。範囲 B〔merge-exec の G0 とマージの実行〕は g0-check.sh と単独の gh pr merge に、
+// 範囲 C〔PR 本文・コメント・resolve の書き込み〕は pr-body-edit.sh・optin-record-count.sh・pr-comment.sh・resolve-thread.sh に、
+// 範囲 D〔削除と終了時の処理〕は worktree-cleanup.sh・discard-safety.sh に移したので、一覧は空。新しい例外は足さない
+// （足すときは range・where・rules・match・reason を持たせる。match は検出した断片〔extractCommandCandidates の 1 行の
+// 切り出し、または extractCommandBlocks の複数行の塊〕に当てる正規表現）
+const KNOWN_EXCEPTIONS = []
 
 // コマンドではない文、または agent に実行させない例（やってはいけない例の説明など）
 // （upstream で PR 作成・push 後の確認が pr-push.sh・observe-pr.sh に移り、「head branch」「head sha」の説明文は消えた）
