@@ -619,6 +619,7 @@ open のサブイシューが残っている場合、または受入基準が未
 | Review fix で push してしまう | Review ループの fix はローカルコミットのみ。push は Step 5.5 のみで行う |
 | Review fix がブランチを checkout している別の worktree を `git -C` で更新しようとして拒否される | Review ループの fix は `fixHeadSha` と `worktreePath` を返すだけにし、ブランチへの fast-forward はホストが隔離されていないエージェントで `scripts/branch-ff.sh` を実行して行う（祖先関係・作業ツリーの clean・許可リストを確かめる。`git update-ref` は使わない）。反映できなければ Issue を blocked にし、fix のコミットの sha と worktree を記録する（Issue #26） |
 | 状態ファイルが壊れたまま再実行して重複 PR を作成する | パースエラー時は即停止。`_/issue-trees/<N>.json` をファイルを読むツール（Read）で開いて確認してから再実行する（`cat` で読まない） |
+| 状態ファイルの項目が `state-unverified` で止まったまま、同じ引数の再実行を繰り返す | ログの「note が長い・複数行の項目」に挙がった項目は、読込の agent が長い `note` を写し間違えてハッシュが合っていない。再実行では直らないため、状態ファイルを写しへ退避（`cp`）してから該当項目の `note` だけを短い 1 行にし、同じ引数で再実行する（[references/recovery.md](references/recovery.md) の「state-unverified で止まった場合」）。新しく書く `note` はホストが 1 行・300 文字以内へ畳む（Issue #28） |
 | 中断後に手動で worktree を削除してから再実行する | 再実行時に Recover phase が自動処理するため手動削除は不要。手動削除してしまうと Recover が残骸なしと判定し、中断前の作業を引き継がずに Plan から新規実行する |
 | fix 以外のエージェントがレビュースレッドを resolve する / fix が対象外スレッドまで resolve する | resolve mutation を実行してよいのは Merge ループの fix（push する版）だけで、対象はリモート head に反映済みの修正（(a) push 成功直後は自分が修正対応したスレッド、(b) push なしラウンドはホストが決定的に算出した許可リストのみ。fix 自身の申告 sha・自前の反映確認は不使用。(b) は現在恒久的に空リスト = 不成立）に限る。monitor / merge-exec / merge-verify / Review ループの fix は実行しない。対象外（out-of-scope）スレッドは resolve せず記録までで停止し、人間が resolve しない限り blocked → 最終レポートへ |
 | 実装コミットの scope にイシュー番号を置く（例: `feat` の scope に `42` を入れる） | `scope-enum` を持つリポでは commitlint が必ず落ちる。Review 3 巡を消費した後の push で初めて検出され、`--no-verify` は禁止のため回避もできない。scope はモジュール・ディレクトリ名にするか省略し、イシューの紐付けは `Refs #<N>` / `Closes #<N>` で行う |
@@ -665,7 +666,7 @@ open のサブイシューが残っている場合、または受入基準が未
 
 ## 中断・失敗からの再開
 
-実行中の状態は `_/issue-trees/<親イシュー番号>.json` に自動保存される。セッションが中断・強制終了した場合でも、**同じ `args` で再実行するだけで再開できる**。状態ファイルの `status` 遷移表・worktree の自動削除・実装エージェントによる既存 PR / リモートブランチの再利用手順は以下を参照。
+実行中の状態は `_/issue-trees/<親イシュー番号>.json` に自動保存される。セッションが中断・強制終了した場合でも、**同じ `args` で再実行するだけで再開できる**。項目の `note` は次のランの読込の転記で誤らないよう、書く前に 1 行・300 文字以内へ畳む（全文は返却値の `results` と journal に残る）。状態ファイルの `status` 遷移表・worktree の自動削除・実装エージェントによる既存 PR / リモートブランチの再利用手順は以下を参照。
 
 詳細: [references/recovery.md](references/recovery.md)
 
