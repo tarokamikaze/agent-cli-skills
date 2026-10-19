@@ -1343,7 +1343,7 @@ const COMMON_LINES=[
 '対象リポジトリに delegation ルールや専門サブエージェントがあれば、それに従い役割単位で委譲する。',
 'ドキュメント・コミット件名・PR 本文は対象リポジトリの言語規約に従う（規約がなければ日本語で書く）。',
 'gh / git fetch / git push などネットワークを使うコマンドは sandbox 無効で実行する。',
-'コミットは pre-commit フックを必ず通す（--no-verify 禁止）。非対話実行で stdin 待ちのフックがハングする場合は git commit に </dev/null を付ける。',
+'コミットは pre-commit フックを必ず通す（--no-verify 禁止）。',
 'git push は pre-push フックが長時間かかる場合があるため、Bash の timeout に 600000 を指定する。',
 '複数イシューが並列実行されている。グローバル状態（メイン working copy のブランチ・共有設定）を変更しない。',
 UNTRUSTED_POLICY,
@@ -1351,7 +1351,16 @@ TEMP_FILE_POLICY,
 REPO_SETTINGS_POLICY,
 LONG_RUNNING_POLICY,
 ]
-const COMMON=COMMON_LINES.join('\n')
+
+
+
+
+const FILE_EDIT_POLICY=
+'ファイル編集とコミットの形: ファイルの作成・編集は Edit / Write ツールだけで行う。python -c・python3 -・ヒアドキュメント（<<）・sed -i・perl -i・printf や echo のリダイレクト（> file）でその場のスクリプトを組み立てて編集しない（権限の確認が出て止まる）。'
++'コマンドの入力に、作業ディレクトリの外のファイル（/dev/null を含む）を < で渡さない。'
++'git commit は -m <メッセージ> か -F <作業ディレクトリ内のファイル> で行い、リダイレクト（</dev/null を含む）を付けない。'
++'コマンドが拒否されたら、同じ目的を別のシェルの形で試さず、Edit / Write ツールに切り替える。'
+const COMMON=[...COMMON_LINES,FILE_EDIT_POLICY].join('\n')
 
 
 

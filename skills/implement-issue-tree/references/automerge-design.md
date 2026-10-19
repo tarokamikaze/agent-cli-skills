@@ -179,6 +179,35 @@ deny 判定は 2 段構えである。**最前段（raw コマンドに対する
 
 登録後、スクリプトに実行権限があることを確認する（`chmod +x`）。hook を導入しなくても、opt-out（既定）ランではクライアント側から自動マージが起きることはない（opt-out ではクライアント側は新規マージ・arm 自体を行わないため。opt-in ランのマージは前述の 3 層で制御する）。hook は監査ログ・多層防御の一層として任意で導入する。
 
+#### シェルでの編集とコミットの形を拒否する hook（取り込み側の任意の設定例）
+
+Workflow の agent（Implement・fix・PR 作成）は、プロンプトでファイルの編集を Edit / Write ツールに限られている。それでも `python3 - <<'EOF'`・`sed -i`・`git commit </dev/null -m ...` のようなシェルの形で編集・コミットすることがあり、これらは Claude Code の組み込みの検査で権限の確認になる。Workflow の agent は確認に答えられず、人が `/workflows` で答えるまで止まる。
+
+取り込み側で PreToolUse hook を足し、この形を**確認ではなく拒否**にすると、agent は拒否の理由を読んで Edit / Write に切り替え、止まらずに進める。拒否は `bypassPermissions` でも効く。subagent（`agent_id` あり）の入力だけを対象にし、main スレッドの操作は変えない。次は取り込み側のリポジトリに置く例（`.claude/hooks/edit-shape-guard.sh`。skill 本体は配らない）で、正規表現による best-effort の検知である。変数経由・`eval`・文字列連結で組み立てた形は防げない。
+
+```bash
+#!/usr/bin/env bash
+input=$(jq -c .) || exit 0
+agent_id=$(printf '%s' "$input" | jq -r '.agent_id // empty')
+[ -z "$agent_id" ] && exit 0
+cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
+deny() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$1"
+  exit 0
+}
+msg_edit="ファイルの編集は Edit / Write ツールで行う。python -c・python3 -・ヒアドキュメント・sed -i・perl -i・printf や echo のリダイレクトでは編集しない"
+printf '%s' "$cmd" | grep -Eq '(^|[;&|[:space:]])python3?[[:space:]]+(-c|-)([[:space:]]|$)' && deny "$msg_edit"
+printf '%s' "$cmd" | grep -Eq '<<-?[[:space:]]*[A-Za-z_"'"'"']' && deny "$msg_edit"
+printf '%s' "$cmd" | grep -Eq '(^|[;&|[:space:]])sed[[:space:]]+(-[A-Za-z]*i|--in-place)' && deny "$msg_edit"
+printf '%s' "$cmd" | grep -Eq '(^|[;&|[:space:]])perl[[:space:]]+-[A-Za-z]*i' && deny "$msg_edit"
+printf '%s' "$cmd" | grep -Eq '(^|[;&|[:space:]])(printf|echo)[[:space:]][^|;&]*>>?[[:space:]]*[^&[:space:]]' && deny "$msg_edit"
+printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+commit[^|;&]*<[[:space:]]*[^<[:space:]]' \
+  && deny "git commit は -m か -F <作業ディレクトリ内のファイル> で行い、< でファイルを渡さない"
+exit 0
+```
+
+登録は、上の `merge-guard-hook.sh` と同じ `hooks.PreToolUse` の `matcher: "Bash"` に、`command` を `"$CLAUDE_PROJECT_DIR"/.claude/hooks/edit-shape-guard.sh` として足す。`jq` が無い環境ではこの例は何も拒否しない（`jq -c .` が失敗して許可に倒れる）ので、`jq` の導入を前提にする。正当な `echo ... > file` や、ヒアドキュメントでメッセージを組み立てる `git commit -m` も拒否されるが、agent は Edit / Write と `git commit -m` に切り替えられるため許容する。
+
 ### branch protection（マージ判定の本体。人間マージ・サーバー側 auto-merge の両運用で必要）
 
 対象ベースブランチには**サーバー側 branch protection / ruleset を設定することを強く推奨**する（ランタイムゲートではなく運用推奨）。compromised なローカルエージェントもサーバー側ルールは迂回できない。人間がマージする運用でも、upstream の `docs/implement-issue-tree/auto-merge-sample.yml` によるサーバー側 auto-merge 運用でも、マージ可否の判定はここが本体になる。特に、注入された monitor 等が仮に何らかの経路でマージを試みても止まるよう、次を設定する:
