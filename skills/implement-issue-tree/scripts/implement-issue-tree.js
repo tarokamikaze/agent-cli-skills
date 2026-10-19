@@ -2576,16 +2576,14 @@ description:
 
 
 
-branchSynced:{
-type:'boolean',
-description:
-'Review ループの fix（push しない）だけが返す。refs/heads/<branch> が fixHeadSha と一致すると確かめた場合のみ true。'
-+'ブランチを更新できなかった場合は false（ホストは Issue を止める）。Merge ループの fix は省略。',
-},
+
+
 fixHeadSha:{
 type:'string',
 maxLength:64,
-description:'Review ループの fix が手順 4c で控えた HEAD の sha（ブランチを更新できなかったとき、人が fix のコミットを回収するための記録）。',
+description:
+'Review ループの fix（push しない）だけが返す。手順 4c で控えた git rev-parse HEAD の結果（40 桁の 16 進）。'
++'ホストがこの sha をブランチへ fast-forward する。ブランチを更新できなかったときは、人が fix のコミットを回収するための記録にもなる。Merge ループの fix は省略。',
 },
 
 
@@ -4021,6 +4019,8 @@ const SCRIPT_SHA256={
 'worktree-remove.sh':'2057d9ee6763f1704fff3d0ac88d006cf073b82697131df52ba39f8120fa45c6',
 'recover-prep.sh':'9b030d7ee9a2c2de6b9aee4a9250f6ed9db0ca9b45f81577c0aad2cf4d234f2e',
 
+'branch-ff.sh':'7d5d6fb9e87f094959757c8cf38f672ea2705fcf6b5f37f6acb5840706f821cf',
+
 
 
 'state-read.sh':'9928021f27f58f6775982020538a213ebf49a05530ea5ae92e324109ff5c1ea2',
@@ -4179,6 +4179,63 @@ return!outputMissing&&result?.ok===true&&result?.retained===false&&(result?.work
 }catch(e){
 log(`⚠️ #${issueNumber}: worktree の不在確認で想定外の例外（${sanitize(String(e?.message ?? e))}）。不在と見なさない`)
 return''
+}
+}
+
+
+
+
+
+
+
+
+
+
+
+function branchFfCommand(branch,sha,fixWorktree,owners){
+if(!isValidBranchName(branch))throw new Error('branch-ff.sh の --branch が不正')
+if(!/^[0-9a-f]{40}$/.test(sha)) throw new Error('branch-ff.sh の --sha は 40 桁の小文字 16 進')
+const allow=[...new Set((Array.isArray(owners)?owners:[]).map((p)=>sanitizeWorktreePath(p)).filter((p)=>p))]
+const parts=['--branch',worktreeQuote(branch),'--sha',sha]
+
+const fixPath=sanitizeWorktreePath(fixWorktree)
+if(fixPath)parts.push('--fix-worktree',worktreeQuote(fixPath))
+for(const p of allow)parts.push('--allow',worktreeQuote(p))
+return scriptInvocation('branch-ff.sh',undefined,` ${parts.join(' ')}`)
+}
+const BRANCH_FF_SCHEMA={
+type:'object',
+required:['ok','result'],
+properties:{
+ok:{type:'boolean',description:'結果の行の ok'},
+result:{type:'string',description:'結果の行の result の語（synced・already-synced・not-fast-forward 等。結果の行が無い・非 0 終了のときは no-result）'},
+},
+}
+const BRANCH_FF_OK_RESULTS=new Set(['synced','already-synced'])
+const isBranchFfValid=(r)=>typeof r?.ok==='boolean'&&typeof r?.result==='string'&& /^[a-z][a-z-]{0,39}$/.test(r.result)
+
+
+async function syncReviewFixBranch(issueNumber,branch,sha,fixWorktree,owners){
+try{
+const{result,outputMissing}=await runStateAgent(
+[
+`ブランチ反映タスク（Review の修正コミットをローカルのブランチへ fast-forward する。push はしない）。`,
+UNTRUSTED_POLICY,
+TEMP_FILE_POLICY,
+`次のコマンドを一字一句そのまま（改変・条件追加・コマンドの組み立て直しをしない）、1 回の Bash 呼び出しで実行する:`,
+'```sh',
+branchFfCommand(branch,sha,fixWorktree,owners),
+'```',
+'標準出力の最後の行 BRANCH_FF_RESULT {json} の ok と result をそのまま返す。非 0 終了・結果の行なしは ok: false・result: no-result で返し（run-verified.sh の exit 3 / 4 はスクリプトの版ずれ・欠落）、git merge・git checkout・git update-ref・git branch -f を自分で実行して代替しない。',
+`返却: ok / result（上記のとおり）。`,
+].join('\n'),
+{label:`branch-ff:#${issueNumber}`,schema:BRANCH_FF_SCHEMA,isValid:isBranchFfValid},
+)
+if(outputMissing)return{synced:false,result:'no-result'}
+return{synced:result.ok===true&&BRANCH_FF_OK_RESULTS.has(result.result),result:result.result}
+}catch(e){
+log(`⚠️ #${issueNumber}: ブランチ反映で想定外の例外（${sanitize(String(e?.message ?? e))}）`)
+return{synced:false,result:'exception'}
 }
 }
 
@@ -6007,14 +6064,8 @@ const placeholderNote=prRef===PR_NUMBER_PLACEHOLDER?`${PR_NUMBER_PLACEHOLDER} �
 return`push 後 CI 起動確認（必須。Issue #479）: 次のコマンドを実行する（${placeholderNote}一字一句そのまま。push 済みの HEAD が PR の head になり、そのチェック総数（check-run + commit status）が 1 件以上で mergeable が確定するまで、1 回の実行は壁時計 90 秒 + 数秒以内で返る）:\n\`\`\`sh\n${command}\n\`\`\`\n標準出力の 1 行 JSON {nonce, payload, sha256} の payload を読む。outcome が pending なら --attempt を 1 増やして同じコマンドをもう一度実行する（最大 4 回 = およそ 5 分。met・exhausted・error・非 0 終了で打ち切る）。checksStarted は payload.checksStarted が 1 のとき true、mergeableAfterPush は payload.mergeable（MERGEABLE / CONFLICTING / UNKNOWN）をそのまま返す（推測で補わない）。err が 1・非 0 終了・JSON なしは checksStarted: false・mergeableAfterPush: "UNKNOWN"（0 件・CONFLICTING と読み替えない）。標準エラーの child setpgid … Operation not permitted は無視してよい。この観測は診断・分岐ヒント専用であり、本手順より前に確定した返却値（prNumber / pushed）の判定を変えてはならない。`
 }
 
-function fixPrompt(item,impl,finding,pushAfterFix=true,permittedNoPushResolveIds=[],branchOwnerWorktrees=[]){
+function fixPrompt(item,impl,finding,pushAfterFix=true,permittedNoPushResolveIds=[]){
 const branch=sanitizeBranch(impl.branch)
-
-
-
-const ownerWorktrees=[...new Set((Array.isArray(branchOwnerWorktrees)?branchOwnerWorktrees:[])
-.map((p)=>sanitizeWorktreePath(p))
-.filter((p)=>p))]
 
 const permittedIds=(Array.isArray(permittedNoPushResolveIds)?permittedNoPushResolveIds:[])
 .map((v)=>sanitizeThreadId(v))
@@ -6086,16 +6137,8 @@ commitlintCheckInstruction,
 
 
 
-`4c. ブランチへの反映（必須。コミットが無い場合も実行する）: 次の Review と push は refs/heads/${branch} を対象にするため、この手順で fix の成果をブランチに載せる。以下の git コマンドは 1 回の Bash 呼び出しで 1 本ずつ実行し、&& や ; でつながない（出力した sha は次のコマンドへ字面で書き写す。シェル変数に頼らない）。`,
-`   a. git rev-parse HEAD の結果を fixHeadSha として控え、git rev-parse refs/heads/${branch} の結果を元の先端として控える。両者が一致する（積むコミットが無かった）ならブランチの更新は不要で、手順 d へ進む。`,
-`   b. git merge-base --is-ancestor <元の先端> <fixHeadSha> が成立することを確かめる（成立しない = 手順 1 の後にブランチが別の操作で動いた）。成立しなければブランチを更新せず手順 e の失敗の形で返す。`,
-`   c. git worktree list --porcelain で、"branch refs/heads/${branch}" の行を持つ worktree（このブランチを checkout している worktree）を探す（git branch -f は、ブランチを別の worktree が checkout していると拒否されるため使わない）。`,
-`      - 見つからない: git update-ref refs/heads/${branch} <fixHeadSha> <元の先端> でブランチを更新する（第 3 引数で元の先端を条件にし、途中で動いていたら更新しない）。`,
-`      - 見つかった worktree のパスが次の許可リストのいずれかと完全一致する場合に限り、その worktree の側で fast-forward する: ${ownerWorktrees.length ? ownerWorktrees.map((p) => JSON.stringify(p)).join(', ') : '(空。worktree の側での更新は行わない)'}。`,
-`        まず git -C <その worktree> status --porcelain --untracked-files=no の出力が空（追跡ファイルの未コミット変更が無い）ことを確かめ、空なら git -C <その worktree> merge --ff-only <fixHeadSha> を実行する（fast-forward のみ。マージコミットは作らない）。出力が空でなければ何も変更せず手順 e の失敗の形で返す。`,
-`      - 見つかった worktree が許可リストに無い（メイン worktree・別のラン・人の作業中の worktree 等）: その worktree には一切触れず（checkout・merge・reset・stash をしない）、手順 e の失敗の形で返す。`,
-`   d. git rev-parse refs/heads/${branch} の結果が fixHeadSha と一致することを確かめる。一致すれば branchSynced: true と fixHeadSha を返す。`,
-`   e. 失敗の形: 上記のいずれかが不成立・コマンドが非 0 終了・d の不一致のときは branchSynced: false と fixHeadSha を返し、summary に「ブランチ ${branch} を fix のコミットへ更新できなかった」と理由（コマンドの出力の要旨・ブランチを checkout している worktree のパス）を書く。この worktree の HEAD（fix のコミット）は消さない（reset・checkout で動かさない）。ホストはこの申告で Issue を止め、fix のコミットを人が回収できるよう sha とこの worktree のパスを記録する。`,
+`4c. fix のコミットの記録（必須。コミットが無い場合も実行する）: git rev-parse HEAD の結果（40 桁の 16 進）を fixHeadSha として返す。refs/heads/${branch} への反映（fast-forward）はホストがこの sha と worktreePath を使って行うので、この手順ではブランチ・他の worktree に一切触れない（git branch -f・git update-ref・git merge・git -C <他の worktree> を実行しない）。`,
+`   ホストは、この worktree の HEAD が fixHeadSha であり、追跡ファイルに未コミットの変更が無いことを確かめてから反映する。指摘の修正はすべてコミットに含め、この worktree の HEAD（fix のコミット）は消さない・動かさない（reset・checkout をしない）。反映できなかったときは、ホストが Issue を止め、fix のコミットを人が回収できるよう sha とこの worktree のパスを記録する。`,
 `   レビュースレッドの resolve は行わない（本経路は push 前の Review ループであり、resolve を実行してよいのは Merge ループの fix が修正のリモート head への反映を確認した後 — 修正 push の成功直後、または過去ラウンド push 済み分の反映確認後 — のみ）。`,
 ]
 return[
@@ -6154,7 +6197,7 @@ summaryText,
 
 
 
-`返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ' / branchSynced（手順 4c d で refs/heads/' + branch + ' が fixHeadSha と一致したと確かめた場合のみ true。それ以外は false。必須） / fixHeadSha（手順 4c a で控えた HEAD の sha）'} / worktreePath（pwd の結果）${pushAfterFix ? ' / checksStarted・mergeableAfterPush（手順 4 の push 後 CI 起動確認の観測結果。任意・診断と分岐ヒント専用）' : ''}${pushAfterFix && Array.isArray(item.optinTests) && item.optinTests.length > 0 ? ' / optinTestRuns（手順 3b で再実行した宣言済み opt-in テストごとの結果） / optinHeadSha（手順 4b a で控えた HEAD sha。optinTestRuns の対象 HEAD）' : ''}/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
+`返却: pushed / summary（作業内容の要約。対象外コメントのマーカーは埋め込まない） / outOfScopeComments（対象外コメントがある場合のみ、{ threadId, reason } の配列）${pushAfterFix ? ' / resolvedThreadIds（手順 5 で resolve に成功した threadId の配列。該当がなければ省略可）' : ' / fixHeadSha（手順 4c で控えた HEAD の sha。40 桁の 16 進。必須）'} / worktreePath（pwd の結果）${pushAfterFix ? ' / checksStarted・mergeableAfterPush（手順 4 の push 後 CI 起動確認の観測結果。任意・診断と分岐ヒント専用）' : ''}${pushAfterFix && Array.isArray(item.optinTests) && item.optinTests.length > 0 ? ' / optinTestRuns（手順 3b で再実行した宣言済み opt-in テストごとの結果） / optinHeadSha（手順 4b a で控えた HEAD sha。optinTestRuns の対象 HEAD）' : ''}/ routingError（手順 0 で worktree 誤配置を検出した場合のみ true。その際 pushed は false。誤配置でなければ省略可）/ commitFailed（修正コミットを作成できなかった場合のみ true — base fetch 失敗・base merge の解消不能 / hook 拒否・commitlint の type / scope 決定不能を含む。その際 pushed は false。コミットできれば省略可）。`,
 ].join('\n')
 }
 
@@ -8117,9 +8160,7 @@ return false
 }
 
 const oldWorktreePathReview=currentWorktreePath
-
-
-const fReview=await agent(fixPrompt(item,impl,{summary:lastReviewSummary,summaryMax:REVIEW_FINDING_MAX},false,[],[impl.worktreePath,currentWorktreePath]),{
+const fReview=await agent(fixPrompt(item,impl,{summary:lastReviewSummary,summaryMax:REVIEW_FINDING_MAX},false,[]),{
 label:`fix:#${item.number}`,
 phase:'Implement',
 ...stageModelOpt('fix','sonnet'),
@@ -8158,15 +8199,23 @@ await updateState(item.number,{status:'failed',pr:0,fixCount,note:reason})
 recordFailure({issue:item.number,reason})
 return false
 }
-if(fReview.branchSynced!==true){
+
+
+
+
+const fixSha=sanitizeSha(fReview.fixHeadSha)
+const sync=fixSha&&isValidBranchName(impl.branch)
+?await syncReviewFixBranch(item.number,impl.branch,fixSha,newWorktreePathReview,[impl.worktreePath,currentWorktreePath])
+:{synced:false,result:fixSha?'branch-invalid':'fix-sha-invalid'}
+if(!sync.synced){
 
 
 
 
 
-const fixSha= /^[0-9a-f]{7,64}$/.test(fReview.fixHeadSha ?? '') ? fReview.fixHeadSha : '(不明)'
+const shownSha=fixSha||(/^[0-9a-f]{7,64}$/.test(fReview.fixHeadSha ?? '') ? fReview.fixHeadSha : '(不明)')
 const reason=
-`Review fix のコミットをブランチ ${sanitize(impl.branch)} に反映できなかった（fix のコミット: ${fixSha}、`+
+`Review fix のコミットをブランチ ${sanitize(impl.branch)} に反映できなかった（理由: ${sync.result}、fix のコミット: ${shownSha}、`+
 `fix worktree: ${newWorktreePathReview || '(不明)'}）。直す前のブランチを再レビューしないよう停止する: ${sanitize(fReview.summary ?? '')}`
 log(`⚠️ issue #${item.number}: ${reason}`)
 recordEphemeralWorktree(item.number,fReview?.worktreePath,'fix-terminal')

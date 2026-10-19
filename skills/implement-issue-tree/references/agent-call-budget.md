@@ -159,13 +159,13 @@ monitoring 再開は予算検査のあとに再開ゲート（残置 worktree �
 
 ### 1 issue の目安 30 の内訳（`AGENT_CALLS_PER_ISSUE.implement`）
 
-通常経路の見積り（約 22）に余裕 8 を足した値。
+通常経路の見積り（約 23）に余裕 7 を足した値（Review ループの fix のブランチへの反映を `branch-ff.sh` のエージェントへ移したとき〔Issue #26〕に見積りが 1 増え、余裕から充てた）。
 
 | 段階 | 回数 |
 |------|------|
 | 状態書込み（開始・planning・implementing・reviewing・unverifiedPr・monitoring・終端・cleanup。フォールバックで +1 し得る） | 約 8 |
 | plan・implement | 2 |
-| Review 2 回 + fix 1 回（1 往復） | 3 |
+| Review 2 回 + fix 1 回（1 往復）+ fix のコミットのブランチへの反映（`branch-ff:#N`）1 回 | 4 |
 | pr-create・PR 照合（`pr-bind`） | 2 |
 | monitor 3 回 | 3 |
 | マージ後の fix と再 monitor | 2 |
