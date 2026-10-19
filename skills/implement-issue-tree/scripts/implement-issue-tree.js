@@ -443,6 +443,23 @@ return s.length>max?`${s.slice(0, max)}（省略）`:s
 
 
 
+
+const STATE_NOTE_MAX_CHARS=300
+
+
+
+
+
+function capStateNote(v){
+const s=[...String(v??'').replace(/[\x00-\x20\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/"/g, "'").replace(/\\/g, '/')]
+return s.length>STATE_NOTE_MAX_CHARS?`${s.slice(0, STATE_NOTE_MAX_CHARS - 4).join('').trimEnd()}（省略）`:s.join('')
+}
+
+const withStateNote=(patch)=>(patch&&patch.note!=null?{ ...patch,note:capStateNote(patch.note)}:patch)
+
+
+
+
 const REVIEW_FINDING_MAX=30000
 
 
@@ -3404,8 +3421,19 @@ v=verifyLoadedItems(items,check)
 }
 const{adopted,dropped,unverified,verified}=v
 if(dropped.length>0||unverified.length>0){
+
+
+const longNotes=unverified.flatMap((k)=>{
+const n=items&&hasOwn(items,k)&&typeof items[k]?.note==='string'?items[k].note:''
+const len=[...n].length
+return len>STATE_NOTE_MAX_CHARS|| /[\r\n]/.test(n) ? [`#${k}（note ${len} 文字${/[\r\n]/.test(n) ? '・複数行' : ''}）`] : []
+})
 log(
-`⚠️ state-unverified ${unverified.length} 件（再取得 2 巡後も未照合: ${unverified.slice(0, 20).join(', ')}）`,
+`⚠️ state-unverified ${unverified.length} 件（再取得 2 巡後も未照合: ${unverified.slice(0, 20).join(', ')}）`+
+(longNotes.length
+?`。note が長い・複数行の項目: ${longNotes.slice(0, 20).join(', ')}。転記の誤りで照合できない可能性が高い。状態ファイルを写しへ退避してから該当項目の note を短い 1 行にし、同じ引数で再実行する`
+:'')+
+`（references/recovery.md の「state-unverified で止まった場合」）`,
 )
 }
 
@@ -3481,7 +3509,8 @@ if(cleanupWorktreePath&&cleanupMode==='discard')sweepHeldPaths.add(cleanupWorktr
 
 
 const deferWorktreeClear=cleanupMode==='discard'&&Boolean(cleanupWorktreePath)&&clearWorktreeAfterCleanup&&patchWorktree===''
-const mergePatch=deferWorktreeClear?Object.fromEntries(Object.entries(patch).filter(([k])=>k!=='worktree')):patch
+
+const mergePatch=withStateNote(deferWorktreeClear?Object.fromEntries(Object.entries(patch).filter(([k])=>k!=='worktree')):patch)
 
 
 
@@ -5183,7 +5212,8 @@ return result?.ok===true
 
 async function writeBlockedStateBatch(entries,savedItems){
 const latest=new Map()
-for(const e of entries)latest.set(assertInt(e.number,'blocked batch number'),e.patch)
+
+for(const e of entries)latest.set(assertInt(e.number,'blocked batch number'),withStateNote(e.patch))
 const pending=[]
 let unchanged=0
 for(const[number,patch]of latest){
@@ -9609,7 +9639,7 @@ const saved=savedItems[String(item.number)]??{}
 
 
 if(unverifiedIssues.has(item.number)){
-const note='state-unverified: 内容照合できないため着手しない。再実行し、解消しなければ該当項目を確認すること'
+const note='state-unverified: 内容照合できないため着手しない。再実行し、解消しなければ references/recovery.md の「state-unverified で止まった場合」に従って該当項目を確認すること（note が長い・複数行なら短い 1 行にする）'
 results.push({issue:item.number,status:'blocked',note})
 failedSet.add(item.number)
 continue

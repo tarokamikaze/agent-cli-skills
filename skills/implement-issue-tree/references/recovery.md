@@ -149,6 +149,10 @@ state 系呼び出しは共通ヘルパー `runStateAgent` を経由する。hai
   PR を拾えないため、重複防止をそれだけに委ねない。状態ファイル自体は書き換えない
 - 検証側にハッシュが無いことは「実ファイルに無い」証明にならない（取りこぼしと捏造を区別
   できない）ため、読込側だけにあるキーも状態なしにはしない
+- 読込は agent の転記に頼るため、長い自由文は写し間違えやすい。状態ファイルの `note` は書き込みの前に
+  ホストが 1 行・300 文字以内へ畳む（`capStateNote`。改行・制御文字は空白、`"` と `\` は `'` と `/` に置き換え、
+  切ったときは末尾に「（省略）」。全文は journal と結果に残る。Issue #28）。この変更より前に書かれた長い `note` が
+  残っていて照合できないときの手当ては、下の「state-unverified で止まった場合」
 - 高水位（容量予約）が読込側と検証側で食い違う場合も停止する（0 へ置き換えて続行すると、過去の
   実測に基づく容量予約を失い並列着手時に容量を過小評価するため）
 - ラン開始時・末尾の孤立 worktree の記録・削除は、全項目を照合できた場合だけ行う
@@ -303,6 +307,41 @@ jq '{hw: .perWorktreeByteReserveHighWater, v: .perWorktreeByteReserveHighWaterVe
 **0b-a（open PR 検索）**: `gh pr list --state open` でイシュー番号に対応する open PR が既に存在しないかを確認する。既存 PR が見つかった場合は新規 PR を作らず、そのブランチを取得して続きから作業し、そのブランチ名を branch として返す（実装フェーズの `prNumber` はホスト側で常に 0 として扱われるため PR 番号は返さない）。PR 番号の再利用は PR Create フェーズが担い、同じブランチに対する open PR を `gh pr list --state open --head <branch>` で再検出し、base ブランチと head sha の一致を検証したうえでその番号を `prNumber` として返す（検証の詳細は Step 5.5 参照）。これにより中断再開時や monitoring フォールバック時に重複 PR の作成も `gh pr create` の失敗も起きない。
 
 **0b-b（リモートブランチ再利用）**: open PR が見つからない場合、`git ls-remote --heads origin` でイシュー番号を含むリモートブランチ（命名規約 `<type>/<N>-<short-name>`）が残っていないか確認する。「push 成功・PR 作成失敗」で残ったブランチを検出し、`git fetch origin <branch> && git checkout -B <branch> origin/<branch>` でそのブランチを取得して push 済みコミットを保持したまま続きを実装する。`origin/<base>` から新規作成し直さないため、push 済みコミットが孤児化しない。このブランチ名を branch として返し、prNumber は 0 のまま（PR は後続の PR Create フェーズが作成する）。
+
+### state-unverified で止まった場合
+
+照合は成立したが一部の項目を採用できなかったとき、その項目は `state-unverified` の `blocked` で止まり、依存する後続も
+止まる（状態ファイルは書き換えない）。ログの次の行で対象と手がかりが分かる:
+
+```
+⚠️ state-unverified 1 件（再取得 2 巡後も未照合: 44）。note が長い・複数行の項目: #44（note 1523 文字・複数行）。…
+```
+
+「note が長い・複数行の項目」が出たときは、`state:load` / `state:load-fill` の agent が長い `note` を一字一句は写せず
+（要約する・改行を空白に変える）、ハッシュが合わなかった可能性が高い。再実行しても同じ所で止まるため、次の順で直す
+（文字数は agent が写した値で測った目安）。
+
+1. 状態ファイルを写しへ退避する（元に戻せるようにする）:
+
+   ```bash
+   cp _/issue-trees/42.json _/issue-trees/42.json.aside
+   ```
+
+2. 該当項目の `note` だけを、要点の短い 1 行（改行なし・数百文字以内）に書き換える。ファイルを編集するツール〔Edit〕で
+   `_/issue-trees/42.json` の `.items["44"].note` を直すか、jq で写しから作り直す。`status`・`pr`・`branch`・`worktree` など
+   ほかのキーは変えない（再開情報を失う）:
+
+   ```bash
+   jq --arg k 44 --arg note '前回の fix の要約（全文は journal）' '.items[$k].note = $note' _/issue-trees/42.json.aside > _/issue-trees/42.json.new
+   mv _/issue-trees/42.json.new _/issue-trees/42.json
+   ```
+
+3. 同じ引数で再実行する。照合に通れば、その項目は保存済みの状態から再開する。
+
+手がかりが出ない（`note` が短い 1 行の）項目は、転記の誤りが一過性のことが多い。そのまま再実行し、2 回続けて同じ項目が
+止まるときは、ファイルを読むツール〔Read〕で項目を確認する（ほかのランが同じ状態ファイルを書いていないかも確かめる）。
+新しく書かれる `note` はホストが 1 行・300 文字以内へ畳むので（上の「状態ファイル読込の内容照合と PR 照合」）、
+長い `note` が残るのはこの変更より前に書かれた状態ファイルだけである。
 
 ### 状態ファイルが壊れている場合
 

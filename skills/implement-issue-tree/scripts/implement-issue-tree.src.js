@@ -440,6 +440,23 @@ function capText(str, max = 2000) {
   return s.length > max ? `${s.slice(0, max)}（省略）` : s
 }
 
+// 状態ファイルの項目の note の上限（コードポイント数。省略の印を含む）。Issue #28: fix の agent の summary（約 1,500 文字・
+// 複数行・引用符入り）をそのまま note に入れると、次のランの state:load / state:load-fill の agent が一字一句は写せず
+// （要約する・改行を空白に変える）、ホストの再計算ハッシュが state:load-verify と合わずに state-unverified で止まった。
+// 状態ファイルには要点だけを残す（全文は journal と結果〔results〕に残る）。
+const STATE_NOTE_MAX_CHARS = 300
+// note を状態ファイルへ書く形（1 行・上限以内）へ畳む純粋関数。書き込みの 2 経路（updateStateDetailed の JSON マージと
+// writeBlockedStateBatch）の手前でだけ使う。改行・タブ・制御文字・DEL は空白にし、連続する空白は 1 つにして前後を除く。
+// JSON のエスケープが要る " と \ は ' と / へ置き換える（agent の転記で誤りやすい形を残さない）。切るときはコードポイント
+// 単位で切り（サロゲートペアを割らない）、末尾に（省略）を付ける。冪等（畳んだ値を再び畳んでも同じ）なので、保存済みの
+// note との比較（isUnchangedStatePatch）にもそのまま使える。null / undefined は空文字。
+function capStateNote(v) {
+  const s = [...String(v ?? '').replace(/[\x00-\x20\x7f]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/"/g, "'").replace(/\\/g, '/')]
+  return s.length > STATE_NOTE_MAX_CHARS ? `${s.slice(0, STATE_NOTE_MAX_CHARS - 4).join('').trimEnd()}（省略）` : s.join('')
+}
+// patch の note だけを畳んだ写しを返す（note を持たない patch はそのまま返す。ほかのキーは変えない）
+const withStateNote = (patch) => (patch && patch.note != null ? { ...patch, note: capStateNote(patch.note) } : patch)
+
 // Review の指摘を fix へ渡すときの上限。Review の summary は全指摘（重大度・箇所・直し方）を並べるため
 // monitor 由来の自由文と同じ 2000 文字で切ると、後半の指摘が fix に届かず直されない。
 // 実用上は切れない大きさにしつつ、肥大化の歯止めとして上限は残す。
@@ -3404,8 +3421,19 @@ async function loadState() {
   }
   const { adopted, dropped, unverified, verified } = v
   if (dropped.length > 0 || unverified.length > 0) {
+    // 原因の手がかり（Issue #28）: 読込側が最後に返した値の note が長い・複数行の項目は、転記の誤りで照合できなかった
+    // 可能性が高い。長さは agent が写した値で測るため目安（実ファイルの値はホストが読めない）。値そのものは出さない
+    const longNotes = unverified.flatMap((k) => {
+      const n = items && hasOwn(items, k) && typeof items[k]?.note === 'string' ? items[k].note : ''
+      const len = [...n].length
+      return len > STATE_NOTE_MAX_CHARS || /[\r\n]/.test(n) ? [`#${k}（note ${len} 文字${/[\r\n]/.test(n) ? '・複数行' : ''}）`] : []
+    })
     log(
-      `⚠️ state-unverified ${unverified.length} 件（再取得 2 巡後も未照合: ${unverified.slice(0, 20).join(', ')}）`,
+      `⚠️ state-unverified ${unverified.length} 件（再取得 2 巡後も未照合: ${unverified.slice(0, 20).join(', ')}）` +
+      (longNotes.length
+        ? `。note が長い・複数行の項目: ${longNotes.slice(0, 20).join(', ')}。転記の誤りで照合できない可能性が高い。状態ファイルを写しへ退避してから該当項目の note を短い 1 行にし、同じ引数で再実行する`
+        : '') +
+      `（references/recovery.md の「state-unverified で止まった場合」）`,
     )
   }
   // 高水位は読込・検証の両エージェントの値の一致を上の停止条件で要求済み（不一致を 0 へ置き換えて続行
@@ -3481,7 +3509,8 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   // discard で .worktree を空にする patch は、JSON マージには含めず、掃除エージェントの手順 2 に任せる（worktree が無くなったときだけ空にする）。
   // 先に空にすると、保持したときに状態ファイルから worktree の記録が消え、failed の書き戻しが失敗した場合に最終スイープの保持対象から外れる
   const deferWorktreeClear = cleanupMode === 'discard' && Boolean(cleanupWorktreePath) && clearWorktreeAfterCleanup && patchWorktree === ''
-  const mergePatch = deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch
+  // note は状態ファイルへ書く前に 1 行・上限以内へ畳む（capStateNote。Issue #28）
+  const mergePatch = withStateNote(deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch)
 
   // 掃除担当エージェントのプロンプト。受け取る値は sanitizeWorktreePath / isValidBranchName で検証済みのパス・ブランチ名と固定文字列のみで、
   // 未信頼由来の自由文（patchJson）は含まない。.worktree のクリア（手順 2）は、削除対象が追跡中の worktree そのものの場合に限り、
@@ -5183,7 +5212,8 @@ async function writeBlockedStateChunk(chunk, label) {
 // chunks / failedChunks。
 async function writeBlockedStateBatch(entries, savedItems) {
   const latest = new Map()
-  for (const e of entries) latest.set(assertInt(e.number, 'blocked batch number'), e.patch)
+  // note は保存済みとの比較の前に畳む（保存済みの note は畳んだ形で書かれている。Issue #28）
+  for (const e of entries) latest.set(assertInt(e.number, 'blocked batch number'), withStateNote(e.patch))
   const pending = []
   let unchanged = 0
   for (const [number, patch] of latest) {
@@ -9609,7 +9639,7 @@ for (const item of queue) {
     // 見失ったまま新規の実装・PR 作成へ進まないよう blocked で止める（halt 非カウント・状態ファイルは
     // 書き換えない）。failedSet に入れ後続の依存も止める（Codex P1）。
     if (unverifiedIssues.has(item.number)) {
-      const note = 'state-unverified: 内容照合できないため着手しない。再実行し、解消しなければ該当項目を確認すること'
+      const note = 'state-unverified: 内容照合できないため着手しない。再実行し、解消しなければ references/recovery.md の「state-unverified で止まった場合」に従って該当項目を確認すること（note が長い・複数行なら短い 1 行にする）'
       results.push({ issue: item.number, status: 'blocked', note })
       failedSet.add(item.number)
       continue
