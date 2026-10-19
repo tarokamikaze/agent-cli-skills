@@ -176,6 +176,7 @@ test('同梱スクリプト・単独のコマンドへ移した箇所が、マ�
   for (const c of ['gh issue comment 5 --body-file <そのファイルの絶対パス>', 'gh issue close 5']) {
     assert.ok(collected.recorded.includes(c), `単独のコマンドにした ${c}`)
   }
+  assert.ok(collected.recorded.some((c) => /^rm -f -- \.implement-issue-tree-[0-9a-f]{32}\.md$/.test(c)), '完了サマリーの一時ファイルの削除も単独のコマンド')
 })
 
 test('再利用 PR の本文の補正は、ブランチ名・ベース名を URL エンコードして渡す。コミットの前に一時ファイルの除外設定を起動させる（Issue #18・#21）', () => {

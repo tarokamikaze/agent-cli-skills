@@ -123,6 +123,23 @@ test('(g) クローズ検証プロンプトは直下だけでなく子孫を再�
   assert.match(p, /closed: false/)
 })
 
+test('(h) クローズ検証プロンプトは完了サマリーの書き込み先をホストが固定し、短いコメントへの切り替えを禁じる', () => {
+  const p = closePrompt({ number: 10, title: 'parent' })
+  // 書き込み先はホストが決めた .implement-issue-tree-<nonce>.md（Write ツールの一時ファイルの既存の置き場）。
+  // agent が /tmp や作業ディレクトリ直下の任意名を選ぶと Write が拒否される（実例あり）
+  const m = p.match(/カレントディレクトリの (\.implement-issue-tree-[0-9a-f]{32}\.md) に/)
+  assert.ok(m, '書き込み先のファイル名がプロンプトに固定されている')
+  assert.equal(p.split(m[1]).length > 2, true, '投稿と削除の手順が同じファイル名を指す')
+  assert.match(p, /gh issue comment 10 --body-file/)
+  assert.match(p, /rm -f -- \.implement-issue-tree-[0-9a-f]{32}\.md/)
+  // 拒否されても別の場所・短いコメントで代替せず、サマリーを残せないままクローズしない
+  assert.match(p, /gh issue close --comment.*(使わない|代替しない)/)
+  assert.match(p, /クローズせず closed: false/)
+  // nonce は親番号ごとに決まり、別の親と衝突しない
+  const other = closePrompt({ number: 11, title: 'parent' }).match(/\.implement-issue-tree-[0-9a-f]{32}\.md/)[0]
+  assert.notEqual(other, m[1])
+})
+
 test('配線: 完全性検査は byParent 構築後・visit(root) より前で、旧 state 経路ではなく新規取得直後に置かれる', () => {
   const check = driverPart.indexOf('findIncompleteTreeNodes(tree.nodes)')
   assert.ok(check > driverPart.indexOf('const byParent = new Map()'))
